@@ -65,35 +65,54 @@ type LogEntry = {
   stack?: string;
 };
 
-const DATE_CACHE_KEY = "receipt-date-cache-v1";
+const DATE_CACHE_KEY = "receipt-date-cache-v2";
 const API_KEY_STORAGE = "openrouter-api-key";
 const MODEL_STORAGE = "openrouter-model";
 
-function loadDateCache(): Record<string, string | null> {
+type CachedDate = { date: string | null; source?: DateSource };
+
+function loadDateCache(): Record<string, CachedDate> {
   try {
-    return JSON.parse(localStorage.getItem(DATE_CACHE_KEY) || "{}");
+    const raw = JSON.parse(localStorage.getItem(DATE_CACHE_KEY) || "{}");
+    // migrate v1 (plain string|null) if present
+    if (raw && typeof raw === "object") {
+      const out: Record<string, CachedDate> = {};
+      for (const [k, v] of Object.entries(raw)) {
+        if (v && typeof v === "object" && "date" in v) out[k] = v as CachedDate;
+        else out[k] = { date: v as string | null, source: "ai" };
+      }
+      return out;
+    }
+    return {};
   } catch {
     return {};
   }
 }
-function saveDateCache(c: Record<string, string | null>) {
+function saveDateCache(c: Record<string, CachedDate>) {
   localStorage.setItem(DATE_CACHE_KEY, JSON.stringify(c));
 }
+
+const MONTHS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+const YEAR_RANGE = 5;
 
 export function ReceiptApp() {
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [globalQuality, setGlobalQuality] = useState(70);
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState<string>(FREE_VISION_MODELS[0]);
-  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
-  const [pdfSize, setPdfSize] = useState(0);
+  const [pdfs, setPdfs] = useState<{ url: string; size: number; pageCount: number }[]>([]);
+  const [pdfSizeLimitMB, setPdfSizeLimitMB] = useState(10);
   const [building, setBuilding] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [credits, setCredits] = useState<OpenRouterCredits | null>(null);
   const [creditsLoading, setCreditsLoading] = useState(false);
   const dragId = useRef<string | null>(null);
-  const dateCache = useRef<Record<string, string | null>>(loadDateCache());
+  const dateCache = useRef<Record<string, CachedDate>>(loadDateCache());
+
 
   const pushLog = useCallback(
     (entry: Omit<LogEntry, "id" | "ts">) => {
