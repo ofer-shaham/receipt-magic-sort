@@ -675,6 +675,24 @@ export function ReceiptApp() {
                 step={5}
               />
             </div>
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <Label className="text-sm">Max PDF size</Label>
+                <span className="font-mono text-sm font-semibold text-primary">
+                  {pdfSizeLimitMB} MB
+                </span>
+              </div>
+              <Slider
+                value={[pdfSizeLimitMB]}
+                onValueChange={(v) => setPdfSizeLimitMB(v[0])}
+                min={1}
+                max={50}
+                step={1}
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Larger sets are split across multiple PDFs to stay under the limit.
+              </p>
+            </div>
             <div className="flex flex-wrap gap-2">
               <Button onClick={runAI} variant="secondary" size="sm" disabled={!receipts.length}>
                 <Sparkles className="mr-1.5 h-4 w-4" /> Extract dates (AI)
@@ -682,11 +700,13 @@ export function ReceiptApp() {
               <Button onClick={reorderByDate} variant="secondary" size="sm" disabled={!receipts.length}>
                 <ArrowUpDown className="mr-1.5 h-4 w-4" /> Sort by date
               </Button>
-              <Button onClick={downloadPdf} disabled={!pdfUrl} size="sm" className="ml-auto">
-                <Download className="mr-1.5 h-4 w-4" /> Download PDF
+              <Button onClick={downloadAllPdfs} disabled={!pdfs.length} size="sm" className="ml-auto">
+                <Download className="mr-1.5 h-4 w-4" />
+                {pdfs.length > 1 ? `Download ${pdfs.length} PDFs` : "Download PDF"}
               </Button>
             </div>
           </Card>
+
 
           {selected && (
             <Card className="space-y-3 p-5">
