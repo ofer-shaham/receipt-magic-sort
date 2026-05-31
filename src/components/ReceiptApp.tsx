@@ -640,19 +640,23 @@ export function ReceiptApp() {
                 <Upload className="h-6 w-6 text-primary" />
               </div>
               <div>
-                <p className="font-medium">Drop receipts or click to upload</p>
-                <p className="text-xs text-muted-foreground">
-                  JPG, PNG, WebP — multiple files supported
+                <p className="font-medium">Drop receipts, ZIP archives, or click to upload</p>
+                <p className="flex items-center justify-center gap-1 text-xs text-muted-foreground">
+                  JPG, PNG, WebP · <Archive className="h-3 w-3" /> ZIP archives (extracted in-memory)
                 </p>
               </div>
               <input
                 type="file"
-                accept="image/*"
+                accept="image/*,.zip,application/zip"
                 multiple
                 className="hidden"
-                onChange={(e) => e.target.files && handleFiles(e.target.files)}
+                onChange={(e) => {
+                  if (e.target.files) handleFiles(e.target.files);
+                  e.target.value = "";
+                }}
               />
             </label>
+
           </Card>
 
           <Card className="space-y-4 p-5">
