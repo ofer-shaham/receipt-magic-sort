@@ -1,6 +1,54 @@
 import { PDFDocument } from "pdf-lib";
+import JSZip from "jszip";
 
-export async function sha256(file: File): Promise<string> {
+// Extract image files from a zip archive (does not persist anything).
+const IMAGE_EXT = /\.(jpe?g|png|webp|gif|bmp|tiff?)$/i;
+export async function extractImagesFromArchive(file: File): Promise<File[]> {
+  const zip = await JSZip.loadAsync(file);
+  const out: File[] = [];
+  const entries = Object.values(zip.files).filter(
+    (e) => !e.dir && IMAGE_EXT.test(e.name) && !e.name.startsWith("__MACOSX/"),
+  );
+  for (const e of entries) {
+    const blob = await e.async("blob");
+    const ext = e.name.match(IMAGE_EXT)?.[1].toLowerCase() ?? "jpg";
+    const mime =
+      ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+    out.push(
+      new File([blob], e.name.split("/").pop() || e.name, { type: mime }),
+    );
+  }
+  return out;
+}
+
+// Build multiple PDFs respecting a max byte size per PDF (greedy packing).
+export async function buildPdfsWithLimit(
+  items: { blob: Blob; width: number; height: number }[],
+  maxBytes: number,
+): Promise<{ bytes: Uint8Array; pageCount: number; size: number }[]> {
+  const PER_PAGE_OVERHEAD = 1200;
+  const HEADER_OVERHEAD = 2000;
+  const results: { bytes: Uint8Array; pageCount: number; size: number }[] = [];
+  let batch: typeof items = [];
+  let estimated = HEADER_OVERHEAD;
+  const flush = async () => {
+    if (!batch.length) return;
+    const bytes = await buildPdf(batch);
+    results.push({ bytes, pageCount: batch.length, size: bytes.byteLength });
+    batch = [];
+    estimated = HEADER_OVERHEAD;
+  };
+  for (const it of items) {
+    const cost = it.blob.size + PER_PAGE_OVERHEAD;
+    if (batch.length && estimated + cost > maxBytes) await flush();
+    batch.push(it);
+    estimated += cost;
+  }
+  await flush();
+  return results;
+}
+
+export async function sha256(file: File | Blob): Promise<string> {
   const buf = await file.arrayBuffer();
   const hash = await crypto.subtle.digest("SHA-256", buf);
   return Array.from(new Uint8Array(hash))
