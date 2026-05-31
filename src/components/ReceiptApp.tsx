@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  buildPdf,
+  buildPdfsWithLimit,
   compressImage,
   extractDateWithAI,
+  extractImagesFromArchive,
   fetchOpenRouterCredits,
   formatBytes,
   FREE_VISION_MODELS,
@@ -29,7 +30,11 @@ import {
   ExternalLink,
   Trash2,
   RefreshCw,
+  Tag,
+  Archive,
 } from "lucide-react";
+
+type DateSource = "ai" | "manual";
 
 type Receipt = {
   id: string;
@@ -46,8 +51,10 @@ type Receipt = {
     height: number;
   };
   date?: string | null;
+  dateSource?: DateSource;
   aiState: "idle" | "loading" | "done" | "error";
 };
+
 
 type LogEntry = {
   id: string;
@@ -58,35 +65,54 @@ type LogEntry = {
   stack?: string;
 };
 
-const DATE_CACHE_KEY = "receipt-date-cache-v1";
+const DATE_CACHE_KEY = "receipt-date-cache-v2";
 const API_KEY_STORAGE = "openrouter-api-key";
 const MODEL_STORAGE = "openrouter-model";
 
-function loadDateCache(): Record<string, string | null> {
+type CachedDate = { date: string | null; source?: DateSource };
+
+function loadDateCache(): Record<string, CachedDate> {
   try {
-    return JSON.parse(localStorage.getItem(DATE_CACHE_KEY) || "{}");
+    const raw = JSON.parse(localStorage.getItem(DATE_CACHE_KEY) || "{}");
+    // migrate v1 (plain string|null) if present
+    if (raw && typeof raw === "object") {
+      const out: Record<string, CachedDate> = {};
+      for (const [k, v] of Object.entries(raw)) {
+        if (v && typeof v === "object" && "date" in v) out[k] = v as CachedDate;
+        else out[k] = { date: v as string | null, source: "ai" };
+      }
+      return out;
+    }
+    return {};
   } catch {
     return {};
   }
 }
-function saveDateCache(c: Record<string, string | null>) {
+function saveDateCache(c: Record<string, CachedDate>) {
   localStorage.setItem(DATE_CACHE_KEY, JSON.stringify(c));
 }
+
+const MONTHS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+const YEAR_RANGE = 5;
 
 export function ReceiptApp() {
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [globalQuality, setGlobalQuality] = useState(70);
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState<string>(FREE_VISION_MODELS[0]);
-  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
-  const [pdfSize, setPdfSize] = useState(0);
+  const [pdfs, setPdfs] = useState<{ url: string; size: number; pageCount: number }[]>([]);
+  const [pdfSizeLimitMB, setPdfSizeLimitMB] = useState(10);
   const [building, setBuilding] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [credits, setCredits] = useState<OpenRouterCredits | null>(null);
   const [creditsLoading, setCreditsLoading] = useState(false);
   const dragId = useRef<string | null>(null);
-  const dateCache = useRef<Record<string, string | null>>(loadDateCache());
+  const dateCache = useRef<Record<string, CachedDate>>(loadDateCache());
+
 
   const pushLog = useCallback(
     (entry: Omit<LogEntry, "id" | "ts">) => {
@@ -195,36 +221,44 @@ export function ReceiptApp() {
     };
   }, [receipts, globalQuality, pushLog]);
 
-  // Rebuild PDF when compressed data ready
+  // Rebuild PDFs (possibly multiple) when compressed data ready
   useEffect(() => {
     let cancelled = false;
-    const ready = receipts.every((r) => r.compressed);
-    if (!ready || receipts.length === 0) {
+    const ready = receipts.length > 0 && receipts.every((r) => r.compressed);
+    if (!ready) {
       if (receipts.length === 0) {
-        setPdfUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev);
-          return null;
+        setPdfs((prev) => {
+          prev.forEach((p) => URL.revokeObjectURL(p.url));
+          return [];
         });
-        setPdfSize(0);
       }
       return;
     }
     setBuilding(true);
     (async () => {
       try {
-        const bytes = await buildPdf(receipts.map((r) => r.compressed!));
+        const limit = Math.max(1, pdfSizeLimitMB) * 1024 * 1024;
+        const out = await buildPdfsWithLimit(
+          receipts.map((r) => r.compressed!),
+          limit,
+        );
         if (cancelled) return;
-        const ab = bytes.buffer.slice(
-          bytes.byteOffset,
-          bytes.byteOffset + bytes.byteLength,
-        ) as ArrayBuffer;
-        const blob = new Blob([ab], { type: "application/pdf" });
-        const url = URL.createObjectURL(blob);
-        setPdfUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev);
-          return url;
+        const next = out.map((p) => {
+          const ab = p.bytes.buffer.slice(
+            p.bytes.byteOffset,
+            p.bytes.byteOffset + p.bytes.byteLength,
+          ) as ArrayBuffer;
+          const blob = new Blob([ab], { type: "application/pdf" });
+          return {
+            url: URL.createObjectURL(blob),
+            size: blob.size,
+            pageCount: p.pageCount,
+          };
         });
-        setPdfSize(blob.size);
+        setPdfs((prev) => {
+          prev.forEach((p) => URL.revokeObjectURL(p.url));
+          return next;
+        });
       } catch (e) {
         pushLog({
           level: "error",
@@ -239,16 +273,15 @@ export function ReceiptApp() {
     return () => {
       cancelled = true;
     };
-  }, [receipts, pushLog]);
+  }, [receipts, pdfSizeLimitMB, pushLog]);
 
-  const handleFiles = useCallback(
-    async (files: FileList | File[]) => {
-      const arr = Array.from(files).filter((f) => f.type.startsWith("image/"));
+  const ingestImageFiles = useCallback(
+    async (arr: File[]) => {
       const newOnes: Receipt[] = [];
       for (const file of arr) {
         try {
           const hash = await sha256(file);
-          const cachedDate = dateCache.current[hash];
+          const cached = dateCache.current[hash];
           newOnes.push({
             id: crypto.randomUUID(),
             hash,
@@ -256,13 +289,14 @@ export function ReceiptApp() {
             originalSize: file.size,
             file,
             qualityOverride: null,
-            date: cachedDate ?? undefined,
+            date: cached?.date ?? undefined,
+            dateSource: cached?.source,
             aiState: "idle",
           });
         } catch (e) {
           pushLog({
             level: "error",
-            source: "handleFiles",
+            source: "ingest",
             message: `${file.name}: ${(e as Error).message}`,
           });
         }
@@ -270,6 +304,41 @@ export function ReceiptApp() {
       setReceipts((prev) => [...prev, ...newOnes]);
     },
     [pushLog],
+  );
+
+  const handleFiles = useCallback(
+    async (files: FileList | File[]) => {
+      const all = Array.from(files);
+      const images = all.filter((f) => f.type.startsWith("image/"));
+      const archives = all.filter(
+        (f) =>
+          /\.zip$/i.test(f.name) ||
+          f.type === "application/zip" ||
+          f.type === "application/x-zip-compressed",
+      );
+      if (images.length) await ingestImageFiles(images);
+      for (const zipFile of archives) {
+        try {
+          const extracted = await extractImagesFromArchive(zipFile);
+          if (!extracted.length) {
+            toast.warning(`${zipFile.name}: no images found`);
+            continue;
+          }
+          await ingestImageFiles(extracted);
+          toast.success(`${zipFile.name}: imported ${extracted.length} image${extracted.length === 1 ? "" : "s"}`);
+        } catch (e) {
+          pushLog({
+            level: "error",
+            source: "archive",
+            message: `${zipFile.name}: ${(e as Error).message}`,
+            stack: (e as Error).stack,
+          });
+          toast.error(`Archive failed: ${(e as Error).message}`);
+        }
+        // archive blob is not retained — it goes out of scope here
+      }
+    },
+    [ingestImageFiles, pushLog],
   );
 
   const onDrop = (e: React.DragEvent) => {
@@ -290,6 +359,39 @@ export function ReceiptApp() {
       return [...withDates, ...without];
     });
     toast.success("Sorted by date");
+  };
+
+  const tagSelectedDate = (year: number, month: number) => {
+    if (!selectedId) return;
+    const date = `${year}-${String(month).padStart(2, "0")}-01`;
+    setReceipts((prev) =>
+      prev.map((x) =>
+        x.id === selectedId
+          ? { ...x, date, dateSource: "manual", aiState: "done" }
+          : x,
+      ),
+    );
+    const r = receipts.find((x) => x.id === selectedId);
+    if (r) {
+      dateCache.current[r.hash] = { date, source: "manual" };
+      saveDateCache(dateCache.current);
+    }
+  };
+
+  const clearSelectedDate = () => {
+    if (!selectedId) return;
+    setReceipts((prev) =>
+      prev.map((x) =>
+        x.id === selectedId
+          ? { ...x, date: undefined, dateSource: undefined, aiState: "idle" }
+          : x,
+      ),
+    );
+    const r = receipts.find((x) => x.id === selectedId);
+    if (r) {
+      delete dateCache.current[r.hash];
+      saveDateCache(dateCache.current);
+    }
   };
 
   const refreshCredits = useCallback(
@@ -329,10 +431,14 @@ export function ReceiptApp() {
     let fromCache = 0;
     for (const r of receipts) {
       if (r.date) continue;
-      if (dateCache.current[r.hash] !== undefined) {
-        const d = dateCache.current[r.hash];
+      const cached = dateCache.current[r.hash];
+      if (cached !== undefined) {
         setReceipts((prev) =>
-          prev.map((x) => (x.id === r.id ? { ...x, date: d, aiState: "done" } : x)),
+          prev.map((x) =>
+            x.id === r.id
+              ? { ...x, date: cached.date, dateSource: cached.source, aiState: "done" }
+              : x,
+          ),
         );
         fromCache++;
         continue;
@@ -343,11 +449,13 @@ export function ReceiptApp() {
       );
       try {
         const d = await extractDateWithAI(apiKey, r.compressed.dataUrl, model);
-        dateCache.current[r.hash] = d;
+        dateCache.current[r.hash] = { date: d, source: "ai" };
         saveDateCache(dateCache.current);
         setReceipts((prev) =>
           prev.map((x) =>
-            x.id === r.id ? { ...x, date: d, aiState: "done" } : x,
+            x.id === r.id
+              ? { ...x, date: d, dateSource: "ai", aiState: "done" }
+              : x,
           ),
         );
         processed++;
@@ -395,17 +503,54 @@ export function ReceiptApp() {
     [receipts, selectedId],
   );
 
-  const downloadPdf = () => {
-    if (!pdfUrl) return;
+  const totalPdfSize = useMemo(
+    () => pdfs.reduce((s, p) => s + p.size, 0),
+    [pdfs],
+  );
+
+  // Per-page mapping to PDF index for preview labels
+  const pageToPdfIndex = useMemo(() => {
+    const map: number[] = [];
+    let idx = 0;
+    let remaining = pdfs[0]?.pageCount ?? 0;
+    for (let i = 0; i < receipts.length; i++) {
+      if (remaining <= 0 && idx < pdfs.length - 1) {
+        idx++;
+        remaining = pdfs[idx].pageCount;
+      }
+      map.push(idx);
+      remaining--;
+    }
+    return map;
+  }, [pdfs, receipts.length]);
+
+  const downloadPdf = (url: string, name: string) => {
     const a = document.createElement("a");
-    a.href = pdfUrl;
-    a.download = `receipts-${Date.now()}.pdf`;
+    a.href = url;
+    a.download = name;
     a.click();
   };
 
-  const openPdfInNewTab = () => {
-    if (pdfUrl) window.open(pdfUrl, "_blank", "noopener,noreferrer");
+  const downloadAllPdfs = () => {
+    const stamp = Date.now();
+    pdfs.forEach((p, i) =>
+      downloadPdf(
+        p.url,
+        pdfs.length === 1
+          ? `receipts-${stamp}.pdf`
+          : `receipts-${stamp}-part${i + 1}.pdf`,
+      ),
+    );
   };
+
+  const openPdfInNewTab = (url: string) =>
+    window.open(url, "_blank", "noopener,noreferrer");
+
+  const years = useMemo(() => {
+    const y = new Date().getFullYear();
+    return Array.from({ length: YEAR_RANGE }, (_, i) => y - i);
+  }, []);
+
 
   return (
     <div className="min-h-screen p-4 md:p-8">
@@ -495,19 +640,23 @@ export function ReceiptApp() {
                 <Upload className="h-6 w-6 text-primary" />
               </div>
               <div>
-                <p className="font-medium">Drop receipts or click to upload</p>
-                <p className="text-xs text-muted-foreground">
-                  JPG, PNG, WebP — multiple files supported
+                <p className="font-medium">Drop receipts, ZIP archives, or click to upload</p>
+                <p className="flex items-center justify-center gap-1 text-xs text-muted-foreground">
+                  JPG, PNG, WebP · <Archive className="h-3 w-3" /> ZIP archives (extracted in-memory)
                 </p>
               </div>
               <input
                 type="file"
-                accept="image/*"
+                accept="image/*,.zip,application/zip"
                 multiple
                 className="hidden"
-                onChange={(e) => e.target.files && handleFiles(e.target.files)}
+                onChange={(e) => {
+                  if (e.target.files) handleFiles(e.target.files);
+                  e.target.value = "";
+                }}
               />
             </label>
+
           </Card>
 
           <Card className="space-y-4 p-5">
@@ -526,6 +675,24 @@ export function ReceiptApp() {
                 step={5}
               />
             </div>
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <Label className="text-sm">Max PDF size</Label>
+                <span className="font-mono text-sm font-semibold text-primary">
+                  {pdfSizeLimitMB} MB
+                </span>
+              </div>
+              <Slider
+                value={[pdfSizeLimitMB]}
+                onValueChange={(v) => setPdfSizeLimitMB(v[0])}
+                min={1}
+                max={50}
+                step={1}
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Larger sets are split across multiple PDFs to stay under the limit.
+              </p>
+            </div>
             <div className="flex flex-wrap gap-2">
               <Button onClick={runAI} variant="secondary" size="sm" disabled={!receipts.length}>
                 <Sparkles className="mr-1.5 h-4 w-4" /> Extract dates (AI)
@@ -533,11 +700,13 @@ export function ReceiptApp() {
               <Button onClick={reorderByDate} variant="secondary" size="sm" disabled={!receipts.length}>
                 <ArrowUpDown className="mr-1.5 h-4 w-4" /> Sort by date
               </Button>
-              <Button onClick={downloadPdf} disabled={!pdfUrl} size="sm" className="ml-auto">
-                <Download className="mr-1.5 h-4 w-4" /> Download PDF
+              <Button onClick={downloadAllPdfs} disabled={!pdfs.length} size="sm" className="ml-auto">
+                <Download className="mr-1.5 h-4 w-4" />
+                {pdfs.length > 1 ? `Download ${pdfs.length} PDFs` : "Download PDF"}
               </Button>
             </div>
           </Card>
+
 
           {selected && (
             <Card className="space-y-3 p-5">
@@ -570,8 +739,51 @@ export function ReceiptApp() {
                 max={100}
                 step={5}
               />
+              <div className="space-y-2 border-t pt-3">
+                <div className="flex items-center justify-between">
+                  <Label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Tag className="h-3 w-3" /> Manual tag (no AI)
+                  </Label>
+                  {selected.date && (
+                    <Button size="sm" variant="ghost" onClick={clearSelectedDate}>
+                      Clear
+                    </Button>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <select
+                    className="h-9 flex-1 rounded-md border bg-card px-2 text-sm"
+                    value={selected.date && selected.dateSource === "manual" ? selected.date.slice(0, 4) : ""}
+                    onChange={(e) => {
+                      const y = Number(e.target.value);
+                      const m = selected.date ? Number(selected.date.slice(5, 7)) : 1;
+                      if (y) tagSelectedDate(y, m);
+                    }}
+                  >
+                    <option value="">Year…</option>
+                    {years.map((y) => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
+                  </select>
+                  <select
+                    className="h-9 flex-1 rounded-md border bg-card px-2 text-sm"
+                    value={selected.date && selected.dateSource === "manual" ? selected.date.slice(5, 7) : ""}
+                    onChange={(e) => {
+                      const m = Number(e.target.value);
+                      const y = selected.date ? Number(selected.date.slice(0, 4)) : years[0];
+                      if (m) tagSelectedDate(y, m);
+                    }}
+                  >
+                    <option value="">Month…</option>
+                    {MONTHS.map((name, i) => (
+                      <option key={name} value={i + 1}>{name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
             </Card>
           )}
+
 
           <div className="space-y-2">
             {receipts.map((r, i) => (
@@ -605,10 +817,19 @@ export function ReceiptApp() {
                       ? `${formatBytes(r.compressed.blob.size)} · ${r.compressed.quality}%`
                       : "Compressing…"}
                     {r.date && (
-                      <span className="ml-2 rounded bg-success/15 px-1.5 py-0.5 font-mono text-[10px] text-success">
+                      <span
+                        className={`ml-2 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                          r.dateSource === "ai"
+                            ? "bg-primary/15 text-primary"
+                            : "bg-success/15 text-success"
+                        }`}
+                        title={r.dateSource === "ai" ? "Extracted by AI" : "Manually tagged"}
+                      >
+                        {r.dateSource === "ai" ? <Sparkles className="h-2.5 w-2.5" /> : <Tag className="h-2.5 w-2.5" />}
                         {r.date}
                       </span>
                     )}
+
                     {r.aiState === "loading" && (
                       <Loader2 className="ml-2 inline h-3 w-3 animate-spin" />
                     )}
@@ -709,30 +930,68 @@ export function ReceiptApp() {
         {/* RIGHT: live preview (image-stack, Brave-safe) */}
         <div className="lg:sticky lg:top-4 lg:self-start">
           <Card className="overflow-hidden">
-            <div className="flex items-center justify-between border-b bg-muted/30 px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/30 px-4 py-3">
               <div className="flex items-center gap-2">
                 <FileText className="h-4 w-4 text-primary" />
                 <span className="text-sm font-semibold">Live PDF preview</span>
                 {building && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
               </div>
-              <div className="flex items-center gap-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
                 <span className="rounded-md bg-card px-2 py-1 font-mono">
                   {receipts.length} {receipts.length === 1 ? "page" : "pages"}
                 </span>
-                <span className="rounded-md bg-primary/10 px-2 py-1 font-mono font-semibold text-primary">
-                  {formatBytes(pdfSize)}
+                <span className="rounded-md bg-card px-2 py-1 font-mono">
+                  {pdfs.length} {pdfs.length === 1 ? "PDF" : "PDFs"}
                 </span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={openPdfInNewTab}
-                  disabled={!pdfUrl}
-                  title="Open generated PDF in a new tab"
+                <span
+                  className="rounded-md bg-primary/10 px-2 py-1 font-mono font-semibold text-primary"
+                  title="Total size across all generated PDFs"
                 >
-                  <ExternalLink className="h-3 w-3" />
-                </Button>
+                  {formatBytes(totalPdfSize)}
+                </span>
               </div>
             </div>
+            {pdfs.length > 0 && (
+              <div className="space-y-1 border-b bg-muted/20 px-4 py-2">
+                {pdfs.map((p, i) => (
+                  <div
+                    key={p.url}
+                    className="flex items-center justify-between gap-2 text-xs"
+                  >
+                    <span className="font-mono">
+                      {pdfs.length > 1 ? `Part ${i + 1}` : "PDF"} ·{" "}
+                      {p.pageCount} {p.pageCount === 1 ? "page" : "pages"} ·{" "}
+                      <span className="font-semibold text-primary">{formatBytes(p.size)}</span>
+                    </span>
+                    <div className="flex gap-1">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => openPdfInNewTab(p.url)}
+                        title="Open in new tab"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          downloadPdf(
+                            p.url,
+                            pdfs.length === 1
+                              ? `receipts.pdf`
+                              : `receipts-part${i + 1}.pdf`,
+                          )
+                        }
+                        title="Download"
+                      >
+                        <Download className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="max-h-[80vh] space-y-4 overflow-auto bg-muted/40 p-4">
               {receipts.length === 0 ? (
                 <div className="flex h-[60vh] items-center justify-center text-sm text-muted-foreground">
@@ -744,8 +1003,31 @@ export function ReceiptApp() {
                     key={r.id}
                     className="relative overflow-hidden rounded-md border bg-white shadow-sm"
                   >
-                    <div className="absolute left-2 top-2 z-10 rounded bg-black/60 px-1.5 py-0.5 font-mono text-[10px] text-white">
-                      Page {i + 1} / {receipts.length}
+                    <div className="absolute left-2 top-2 z-10 flex gap-1">
+                      <span className="rounded bg-black/60 px-1.5 py-0.5 font-mono text-[10px] text-white">
+                        Page {i + 1} / {receipts.length}
+                      </span>
+                      {pdfs.length > 1 && pageToPdfIndex[i] !== undefined && (
+                        <span className="rounded bg-primary/80 px-1.5 py-0.5 font-mono text-[10px] text-primary-foreground">
+                          PDF {pageToPdfIndex[i] + 1}
+                        </span>
+                      )}
+                      {r.date && (
+                        <span
+                          className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                            r.dateSource === "ai"
+                              ? "bg-primary/80 text-primary-foreground"
+                              : "bg-emerald-600/80 text-white"
+                          }`}
+                        >
+                          {r.dateSource === "ai" ? (
+                            <Sparkles className="h-2.5 w-2.5" />
+                          ) : (
+                            <Tag className="h-2.5 w-2.5" />
+                          )}
+                          {r.date}
+                        </span>
+                      )}
                     </div>
                     {r.compressed ? (
                       <img
@@ -764,25 +1046,10 @@ export function ReceiptApp() {
               )}
             </div>
             <div className="border-t bg-muted/20 px-4 py-2 text-[11px] text-muted-foreground">
-              Note: Preview shows page images. Some browsers (e.g. Brave) block
-              embedded PDF viewers — use{" "}
-              <button
-                onClick={openPdfInNewTab}
-                disabled={!pdfUrl}
-                className="underline disabled:opacity-50"
-              >
-                Open PDF
-              </button>{" "}
-              or{" "}
-              <button
-                onClick={downloadPdf}
-                disabled={!pdfUrl}
-                className="underline disabled:opacity-50"
-              >
-                Download
-              </button>
-              .
+              Tip: Some browsers (e.g. Brave) block embedded PDF viewers — use
+              the per-file Open / Download buttons above.
             </div>
+
           </Card>
         </div>
       </div>
