@@ -68,6 +68,7 @@ export function formatBytes(n: number): string {
 
 // Free vision-capable models on OpenRouter (no cost). Ordered by preference.
 export const FREE_VISION_MODELS = [
+  "nvidia/nemotron-nano-12b-v2-vl:free",
   "meta-llama/llama-3.2-11b-vision-instruct:free",
   "qwen/qwen2.5-vl-72b-instruct:free",
   "google/gemini-2.0-flash-exp:free",
