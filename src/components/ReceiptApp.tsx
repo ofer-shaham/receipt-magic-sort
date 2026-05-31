@@ -930,30 +930,68 @@ export function ReceiptApp() {
         {/* RIGHT: live preview (image-stack, Brave-safe) */}
         <div className="lg:sticky lg:top-4 lg:self-start">
           <Card className="overflow-hidden">
-            <div className="flex items-center justify-between border-b bg-muted/30 px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/30 px-4 py-3">
               <div className="flex items-center gap-2">
                 <FileText className="h-4 w-4 text-primary" />
                 <span className="text-sm font-semibold">Live PDF preview</span>
                 {building && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
               </div>
-              <div className="flex items-center gap-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
                 <span className="rounded-md bg-card px-2 py-1 font-mono">
                   {receipts.length} {receipts.length === 1 ? "page" : "pages"}
                 </span>
-                <span className="rounded-md bg-primary/10 px-2 py-1 font-mono font-semibold text-primary">
-                  {formatBytes(pdfSize)}
+                <span className="rounded-md bg-card px-2 py-1 font-mono">
+                  {pdfs.length} {pdfs.length === 1 ? "PDF" : "PDFs"}
                 </span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={openPdfInNewTab}
-                  disabled={!pdfUrl}
-                  title="Open generated PDF in a new tab"
+                <span
+                  className="rounded-md bg-primary/10 px-2 py-1 font-mono font-semibold text-primary"
+                  title="Total size across all generated PDFs"
                 >
-                  <ExternalLink className="h-3 w-3" />
-                </Button>
+                  {formatBytes(totalPdfSize)}
+                </span>
               </div>
             </div>
+            {pdfs.length > 0 && (
+              <div className="space-y-1 border-b bg-muted/20 px-4 py-2">
+                {pdfs.map((p, i) => (
+                  <div
+                    key={p.url}
+                    className="flex items-center justify-between gap-2 text-xs"
+                  >
+                    <span className="font-mono">
+                      {pdfs.length > 1 ? `Part ${i + 1}` : "PDF"} ·{" "}
+                      {p.pageCount} {p.pageCount === 1 ? "page" : "pages"} ·{" "}
+                      <span className="font-semibold text-primary">{formatBytes(p.size)}</span>
+                    </span>
+                    <div className="flex gap-1">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => openPdfInNewTab(p.url)}
+                        title="Open in new tab"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          downloadPdf(
+                            p.url,
+                            pdfs.length === 1
+                              ? `receipts.pdf`
+                              : `receipts-part${i + 1}.pdf`,
+                          )
+                        }
+                        title="Download"
+                      >
+                        <Download className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="max-h-[80vh] space-y-4 overflow-auto bg-muted/40 p-4">
               {receipts.length === 0 ? (
                 <div className="flex h-[60vh] items-center justify-center text-sm text-muted-foreground">
@@ -965,8 +1003,31 @@ export function ReceiptApp() {
                     key={r.id}
                     className="relative overflow-hidden rounded-md border bg-white shadow-sm"
                   >
-                    <div className="absolute left-2 top-2 z-10 rounded bg-black/60 px-1.5 py-0.5 font-mono text-[10px] text-white">
-                      Page {i + 1} / {receipts.length}
+                    <div className="absolute left-2 top-2 z-10 flex gap-1">
+                      <span className="rounded bg-black/60 px-1.5 py-0.5 font-mono text-[10px] text-white">
+                        Page {i + 1} / {receipts.length}
+                      </span>
+                      {pdfs.length > 1 && pageToPdfIndex[i] !== undefined && (
+                        <span className="rounded bg-primary/80 px-1.5 py-0.5 font-mono text-[10px] text-primary-foreground">
+                          PDF {pageToPdfIndex[i] + 1}
+                        </span>
+                      )}
+                      {r.date && (
+                        <span
+                          className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                            r.dateSource === "ai"
+                              ? "bg-primary/80 text-primary-foreground"
+                              : "bg-emerald-600/80 text-white"
+                          }`}
+                        >
+                          {r.dateSource === "ai" ? (
+                            <Sparkles className="h-2.5 w-2.5" />
+                          ) : (
+                            <Tag className="h-2.5 w-2.5" />
+                          )}
+                          {r.date}
+                        </span>
+                      )}
                     </div>
                     {r.compressed ? (
                       <img
@@ -985,25 +1046,10 @@ export function ReceiptApp() {
               )}
             </div>
             <div className="border-t bg-muted/20 px-4 py-2 text-[11px] text-muted-foreground">
-              Note: Preview shows page images. Some browsers (e.g. Brave) block
-              embedded PDF viewers — use{" "}
-              <button
-                onClick={openPdfInNewTab}
-                disabled={!pdfUrl}
-                className="underline disabled:opacity-50"
-              >
-                Open PDF
-              </button>{" "}
-              or{" "}
-              <button
-                onClick={downloadPdf}
-                disabled={!pdfUrl}
-                className="underline disabled:opacity-50"
-              >
-                Download
-              </button>
-              .
+              Tip: Some browsers (e.g. Brave) block embedded PDF viewers — use
+              the per-file Open / Download buttons above.
             </div>
+
           </Card>
         </div>
       </div>
