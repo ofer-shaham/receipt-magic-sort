@@ -66,9 +66,17 @@ export function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(2)} MB`;
 }
 
+// Free vision-capable models on OpenRouter (no cost). Ordered by preference.
+export const FREE_VISION_MODELS = [
+  "meta-llama/llama-3.2-11b-vision-instruct:free",
+  "qwen/qwen2.5-vl-72b-instruct:free",
+  "google/gemini-2.0-flash-exp:free",
+] as const;
+
 export async function extractDateWithAI(
   apiKey: string,
   dataUrl: string,
+  model: string = FREE_VISION_MODELS[0],
 ): Promise<string | null> {
   // Crop top 35% to save tokens
   const img = await loadImage(dataUrl);
@@ -87,7 +95,7 @@ export async function extractDateWithAI(
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "google/gemini-2.5-flash",
+      model,
       messages: [
         {
           role: "user",
@@ -102,9 +110,38 @@ export async function extractDateWithAI(
       ],
     }),
   });
-  if (!res.ok) throw new Error(`OpenRouter ${res.status}`);
-  const json = await res.json();
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = json?.error?.message || `HTTP ${res.status}`;
+    throw new Error(`OpenRouter: ${msg}`);
+  }
   const txt = (json.choices?.[0]?.message?.content ?? "").trim();
   const match = txt.match(/\d{4}-\d{2}-\d{2}/);
   return match ? match[0] : null;
+}
+
+export type OpenRouterCredits = {
+  totalCredits: number;
+  totalUsage: number;
+  remaining: number;
+};
+
+export async function fetchOpenRouterCredits(
+  apiKey: string,
+): Promise<OpenRouterCredits> {
+  const res = await fetch("https://openrouter.ai/api/v1/credits", {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = json?.error?.message || `HTTP ${res.status}`;
+    throw new Error(`Credits fetch: ${msg}`);
+  }
+  const totalCredits = Number(json?.data?.total_credits ?? 0);
+  const totalUsage = Number(json?.data?.total_usage ?? 0);
+  return {
+    totalCredits,
+    totalUsage,
+    remaining: Math.max(0, totalCredits - totalUsage),
+  };
 }
