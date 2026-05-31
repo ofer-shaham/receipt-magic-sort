@@ -739,8 +739,51 @@ export function ReceiptApp() {
                 max={100}
                 step={5}
               />
+              <div className="space-y-2 border-t pt-3">
+                <div className="flex items-center justify-between">
+                  <Label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Tag className="h-3 w-3" /> Manual tag (no AI)
+                  </Label>
+                  {selected.date && (
+                    <Button size="sm" variant="ghost" onClick={clearSelectedDate}>
+                      Clear
+                    </Button>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <select
+                    className="h-9 flex-1 rounded-md border bg-card px-2 text-sm"
+                    value={selected.date && selected.dateSource === "manual" ? selected.date.slice(0, 4) : ""}
+                    onChange={(e) => {
+                      const y = Number(e.target.value);
+                      const m = selected.date ? Number(selected.date.slice(5, 7)) : 1;
+                      if (y) tagSelectedDate(y, m);
+                    }}
+                  >
+                    <option value="">Year…</option>
+                    {years.map((y) => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
+                  </select>
+                  <select
+                    className="h-9 flex-1 rounded-md border bg-card px-2 text-sm"
+                    value={selected.date && selected.dateSource === "manual" ? selected.date.slice(5, 7) : ""}
+                    onChange={(e) => {
+                      const m = Number(e.target.value);
+                      const y = selected.date ? Number(selected.date.slice(0, 4)) : years[0];
+                      if (m) tagSelectedDate(y, m);
+                    }}
+                  >
+                    <option value="">Month…</option>
+                    {MONTHS.map((name, i) => (
+                      <option key={name} value={i + 1}>{name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
             </Card>
           )}
+
 
           <div className="space-y-2">
             {receipts.map((r, i) => (
