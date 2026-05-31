@@ -221,36 +221,44 @@ export function ReceiptApp() {
     };
   }, [receipts, globalQuality, pushLog]);
 
-  // Rebuild PDF when compressed data ready
+  // Rebuild PDFs (possibly multiple) when compressed data ready
   useEffect(() => {
     let cancelled = false;
-    const ready = receipts.every((r) => r.compressed);
-    if (!ready || receipts.length === 0) {
+    const ready = receipts.length > 0 && receipts.every((r) => r.compressed);
+    if (!ready) {
       if (receipts.length === 0) {
-        setPdfUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev);
-          return null;
+        setPdfs((prev) => {
+          prev.forEach((p) => URL.revokeObjectURL(p.url));
+          return [];
         });
-        setPdfSize(0);
       }
       return;
     }
     setBuilding(true);
     (async () => {
       try {
-        const bytes = await buildPdf(receipts.map((r) => r.compressed!));
+        const limit = Math.max(1, pdfSizeLimitMB) * 1024 * 1024;
+        const out = await buildPdfsWithLimit(
+          receipts.map((r) => r.compressed!),
+          limit,
+        );
         if (cancelled) return;
-        const ab = bytes.buffer.slice(
-          bytes.byteOffset,
-          bytes.byteOffset + bytes.byteLength,
-        ) as ArrayBuffer;
-        const blob = new Blob([ab], { type: "application/pdf" });
-        const url = URL.createObjectURL(blob);
-        setPdfUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev);
-          return url;
+        const next = out.map((p) => {
+          const ab = p.bytes.buffer.slice(
+            p.bytes.byteOffset,
+            p.bytes.byteOffset + p.bytes.byteLength,
+          ) as ArrayBuffer;
+          const blob = new Blob([ab], { type: "application/pdf" });
+          return {
+            url: URL.createObjectURL(blob),
+            size: blob.size,
+            pageCount: p.pageCount,
+          };
         });
-        setPdfSize(blob.size);
+        setPdfs((prev) => {
+          prev.forEach((p) => URL.revokeObjectURL(p.url));
+          return next;
+        });
       } catch (e) {
         pushLog({
           level: "error",
@@ -265,16 +273,15 @@ export function ReceiptApp() {
     return () => {
       cancelled = true;
     };
-  }, [receipts, pushLog]);
+  }, [receipts, pdfSizeLimitMB, pushLog]);
 
-  const handleFiles = useCallback(
-    async (files: FileList | File[]) => {
-      const arr = Array.from(files).filter((f) => f.type.startsWith("image/"));
+  const ingestImageFiles = useCallback(
+    async (arr: File[]) => {
       const newOnes: Receipt[] = [];
       for (const file of arr) {
         try {
           const hash = await sha256(file);
-          const cachedDate = dateCache.current[hash];
+          const cached = dateCache.current[hash];
           newOnes.push({
             id: crypto.randomUUID(),
             hash,
@@ -282,13 +289,14 @@ export function ReceiptApp() {
             originalSize: file.size,
             file,
             qualityOverride: null,
-            date: cachedDate ?? undefined,
+            date: cached?.date ?? undefined,
+            dateSource: cached?.source,
             aiState: "idle",
           });
         } catch (e) {
           pushLog({
             level: "error",
-            source: "handleFiles",
+            source: "ingest",
             message: `${file.name}: ${(e as Error).message}`,
           });
         }
@@ -296,6 +304,41 @@ export function ReceiptApp() {
       setReceipts((prev) => [...prev, ...newOnes]);
     },
     [pushLog],
+  );
+
+  const handleFiles = useCallback(
+    async (files: FileList | File[]) => {
+      const all = Array.from(files);
+      const images = all.filter((f) => f.type.startsWith("image/"));
+      const archives = all.filter(
+        (f) =>
+          /\.zip$/i.test(f.name) ||
+          f.type === "application/zip" ||
+          f.type === "application/x-zip-compressed",
+      );
+      if (images.length) await ingestImageFiles(images);
+      for (const zipFile of archives) {
+        try {
+          const extracted = await extractImagesFromArchive(zipFile);
+          if (!extracted.length) {
+            toast.warning(`${zipFile.name}: no images found`);
+            continue;
+          }
+          await ingestImageFiles(extracted);
+          toast.success(`${zipFile.name}: imported ${extracted.length} image${extracted.length === 1 ? "" : "s"}`);
+        } catch (e) {
+          pushLog({
+            level: "error",
+            source: "archive",
+            message: `${zipFile.name}: ${(e as Error).message}`,
+            stack: (e as Error).stack,
+          });
+          toast.error(`Archive failed: ${(e as Error).message}`);
+        }
+        // archive blob is not retained — it goes out of scope here
+      }
+    },
+    [ingestImageFiles, pushLog],
   );
 
   const onDrop = (e: React.DragEvent) => {
@@ -316,6 +359,39 @@ export function ReceiptApp() {
       return [...withDates, ...without];
     });
     toast.success("Sorted by date");
+  };
+
+  const tagSelectedDate = (year: number, month: number) => {
+    if (!selectedId) return;
+    const date = `${year}-${String(month).padStart(2, "0")}-01`;
+    setReceipts((prev) =>
+      prev.map((x) =>
+        x.id === selectedId
+          ? { ...x, date, dateSource: "manual", aiState: "done" }
+          : x,
+      ),
+    );
+    const r = receipts.find((x) => x.id === selectedId);
+    if (r) {
+      dateCache.current[r.hash] = { date, source: "manual" };
+      saveDateCache(dateCache.current);
+    }
+  };
+
+  const clearSelectedDate = () => {
+    if (!selectedId) return;
+    setReceipts((prev) =>
+      prev.map((x) =>
+        x.id === selectedId
+          ? { ...x, date: undefined, dateSource: undefined, aiState: "idle" }
+          : x,
+      ),
+    );
+    const r = receipts.find((x) => x.id === selectedId);
+    if (r) {
+      delete dateCache.current[r.hash];
+      saveDateCache(dateCache.current);
+    }
   };
 
   const refreshCredits = useCallback(
@@ -355,10 +431,14 @@ export function ReceiptApp() {
     let fromCache = 0;
     for (const r of receipts) {
       if (r.date) continue;
-      if (dateCache.current[r.hash] !== undefined) {
-        const d = dateCache.current[r.hash];
+      const cached = dateCache.current[r.hash];
+      if (cached !== undefined) {
         setReceipts((prev) =>
-          prev.map((x) => (x.id === r.id ? { ...x, date: d, aiState: "done" } : x)),
+          prev.map((x) =>
+            x.id === r.id
+              ? { ...x, date: cached.date, dateSource: cached.source, aiState: "done" }
+              : x,
+          ),
         );
         fromCache++;
         continue;
@@ -369,11 +449,13 @@ export function ReceiptApp() {
       );
       try {
         const d = await extractDateWithAI(apiKey, r.compressed.dataUrl, model);
-        dateCache.current[r.hash] = d;
+        dateCache.current[r.hash] = { date: d, source: "ai" };
         saveDateCache(dateCache.current);
         setReceipts((prev) =>
           prev.map((x) =>
-            x.id === r.id ? { ...x, date: d, aiState: "done" } : x,
+            x.id === r.id
+              ? { ...x, date: d, dateSource: "ai", aiState: "done" }
+              : x,
           ),
         );
         processed++;
@@ -421,17 +503,54 @@ export function ReceiptApp() {
     [receipts, selectedId],
   );
 
-  const downloadPdf = () => {
-    if (!pdfUrl) return;
+  const totalPdfSize = useMemo(
+    () => pdfs.reduce((s, p) => s + p.size, 0),
+    [pdfs],
+  );
+
+  // Per-page mapping to PDF index for preview labels
+  const pageToPdfIndex = useMemo(() => {
+    const map: number[] = [];
+    let idx = 0;
+    let remaining = pdfs[0]?.pageCount ?? 0;
+    for (let i = 0; i < receipts.length; i++) {
+      if (remaining <= 0 && idx < pdfs.length - 1) {
+        idx++;
+        remaining = pdfs[idx].pageCount;
+      }
+      map.push(idx);
+      remaining--;
+    }
+    return map;
+  }, [pdfs, receipts.length]);
+
+  const downloadPdf = (url: string, name: string) => {
     const a = document.createElement("a");
-    a.href = pdfUrl;
-    a.download = `receipts-${Date.now()}.pdf`;
+    a.href = url;
+    a.download = name;
     a.click();
   };
 
-  const openPdfInNewTab = () => {
-    if (pdfUrl) window.open(pdfUrl, "_blank", "noopener,noreferrer");
+  const downloadAllPdfs = () => {
+    const stamp = Date.now();
+    pdfs.forEach((p, i) =>
+      downloadPdf(
+        p.url,
+        pdfs.length === 1
+          ? `receipts-${stamp}.pdf`
+          : `receipts-${stamp}-part${i + 1}.pdf`,
+      ),
+    );
   };
+
+  const openPdfInNewTab = (url: string) =>
+    window.open(url, "_blank", "noopener,noreferrer");
+
+  const years = useMemo(() => {
+    const y = new Date().getFullYear();
+    return Array.from({ length: YEAR_RANGE }, (_, i) => y - i);
+  }, []);
+
 
   return (
     <div className="min-h-screen p-4 md:p-8">
