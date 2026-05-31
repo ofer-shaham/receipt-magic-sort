@@ -817,10 +817,19 @@ export function ReceiptApp() {
                       ? `${formatBytes(r.compressed.blob.size)} · ${r.compressed.quality}%`
                       : "Compressing…"}
                     {r.date && (
-                      <span className="ml-2 rounded bg-success/15 px-1.5 py-0.5 font-mono text-[10px] text-success">
+                      <span
+                        className={`ml-2 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                          r.dateSource === "ai"
+                            ? "bg-primary/15 text-primary"
+                            : "bg-success/15 text-success"
+                        }`}
+                        title={r.dateSource === "ai" ? "Extracted by AI" : "Manually tagged"}
+                      >
+                        {r.dateSource === "ai" ? <Sparkles className="h-2.5 w-2.5" /> : <Tag className="h-2.5 w-2.5" />}
                         {r.date}
                       </span>
                     )}
+
                     {r.aiState === "loading" && (
                       <Loader2 className="ml-2 inline h-3 w-3 animate-spin" />
                     )}
