@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  buildPdf,
+  buildPdfsWithLimit,
   compressImage,
   extractDateWithAI,
+  extractImagesFromArchive,
   fetchOpenRouterCredits,
   formatBytes,
   FREE_VISION_MODELS,
@@ -29,7 +30,11 @@ import {
   ExternalLink,
   Trash2,
   RefreshCw,
+  Tag,
+  Archive,
 } from "lucide-react";
+
+type DateSource = "ai" | "manual";
 
 type Receipt = {
   id: string;
@@ -46,8 +51,10 @@ type Receipt = {
     height: number;
   };
   date?: string | null;
+  dateSource?: DateSource;
   aiState: "idle" | "loading" | "done" | "error";
 };
+
 
 type LogEntry = {
   id: string;
