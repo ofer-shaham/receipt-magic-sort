@@ -956,6 +956,39 @@ export function ReceiptApp() {
                       }}
                     />
                   </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-3 border-t pt-3">
+                    <div className="flex items-center gap-2">
+                      <Checkbox
+                        id="autosave"
+                        checked={settings.autoSaveEnabled}
+                        onCheckedChange={(c) =>
+                          setSettings((s) => ({ ...s, autoSaveEnabled: c === true }))
+                        }
+                      />
+                      <Label htmlFor="autosave" className="text-sm">
+                        Auto-save exported data
+                      </Label>
+                    </div>
+                    {settings.autoSaveEnabled && (
+                      <div className="flex items-center gap-2">
+                        <Label className="text-xs text-muted-foreground">Every</Label>
+                        <Input
+                          type="number"
+                          min={5}
+                          max={3600}
+                          value={settings.autoSaveIntervalSec}
+                          onChange={(e) =>
+                            setSettings((s) => ({
+                              ...s,
+                              autoSaveIntervalSec: Math.max(5, Number(e.target.value) || 60),
+                            }))
+                          }
+                          className="h-7 w-20 text-xs"
+                        />
+                        <span className="text-xs text-muted-foreground">seconds</span>
+                      </div>
+                    )}
+                  </div>
                 </AccordionContent>
               </AccordionItem>
 
