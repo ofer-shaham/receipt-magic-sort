@@ -203,7 +203,7 @@ export function ReceiptApp() {
 
   const dateCache = useRef<Record<string, CachedDate>>(loadDateCache());
   const keyIndexRef = useRef(0);
-  const keyStateRef = useRef<KeyStatus[]>([]);
+  const keyStateRef = useRef<Record<string, KeyStatus>>({});
   const cancelAIRef = useRef(false);
   const importFileRef = useRef<HTMLInputElement>(null);
 
