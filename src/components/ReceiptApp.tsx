@@ -2,12 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   buildPdfsWithLimit,
   compressImage,
-  extractDateWithAI,
+  extractDateRoundRobin,
   extractImagesFromArchive,
   fetchOpenRouterCredits,
   formatBytes,
   FREE_VISION_MODELS,
-  sha256,
   type OpenRouterCredits,
 } from "@/lib/receipt-utils";
 import { Button } from "@/components/ui/button";
@@ -15,6 +14,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
   Upload,
@@ -32,14 +37,19 @@ import {
   RefreshCw,
   Tag,
   Archive,
+  Wand2,
+  ChevronLeft,
+  ChevronRight,
+  Check,
+  Maximize2,
 } from "lucide-react";
 
 type DateSource = "ai" | "manual";
 
 type Receipt = {
   id: string;
-  hash: string;
   name: string;
+  cacheKey: string;
   originalSize: number;
   file: File;
   qualityOverride: number | null;
@@ -50,11 +60,13 @@ type Receipt = {
     width: number;
     height: number;
   };
+  /** ISO date YYYY-MM-DD used for sorting */
   date?: string | null;
+  /** Original date as printed on the receipt */
+  dateRaw?: string | null;
   dateSource?: DateSource;
-  aiState: "idle" | "loading" | "done" | "error";
+  aiState: "idle" | "queued" | "loading" | "done" | "error";
 };
-
 
 type LogEntry = {
   id: string;
@@ -65,24 +77,25 @@ type LogEntry = {
   stack?: string;
 };
 
-const DATE_CACHE_KEY = "receipt-date-cache-v2";
-const API_KEY_STORAGE = "openrouter-api-key";
+const DATE_CACHE_KEY = "receipt-date-cache-v3";
+const API_KEYS_STORAGE = "openrouter-api-keys";
 const MODEL_STORAGE = "openrouter-model";
 
-type CachedDate = { date: string | null; source?: DateSource };
+type CachedDate = {
+  iso: string | null;
+  raw: string | null;
+  source?: DateSource;
+};
+
+/** Cache key: image filename + size — survives across uploads of identical files. */
+function makeCacheKey(file: { name: string; size: number }) {
+  return `${file.name}::${file.size}`;
+}
 
 function loadDateCache(): Record<string, CachedDate> {
   try {
     const raw = JSON.parse(localStorage.getItem(DATE_CACHE_KEY) || "{}");
-    // migrate v1 (plain string|null) if present
-    if (raw && typeof raw === "object") {
-      const out: Record<string, CachedDate> = {};
-      for (const [k, v] of Object.entries(raw)) {
-        if (v && typeof v === "object" && "date" in v) out[k] = v as CachedDate;
-        else out[k] = { date: v as string | null, source: "ai" };
-      }
-      return out;
-    }
+    if (raw && typeof raw === "object") return raw as Record<string, CachedDate>;
     return {};
   } catch {
     return {};
@@ -98,10 +111,17 @@ const MONTHS = [
 ];
 const YEAR_RANGE = 5;
 
+function parseKeys(s: string): string[] {
+  return s
+    .split(/[\s,;\n]+/)
+    .map((k) => k.trim())
+    .filter(Boolean);
+}
+
 export function ReceiptApp() {
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [globalQuality, setGlobalQuality] = useState(70);
-  const [apiKey, setApiKey] = useState("");
+  const [apiKeysText, setApiKeysText] = useState("");
   const [model, setModel] = useState<string>(FREE_VISION_MODELS[0]);
   const [pdfs, setPdfs] = useState<{ url: string; size: number; pageCount: number }[]>([]);
   const [pdfSizeLimitMB, setPdfSizeLimitMB] = useState(10);
@@ -110,29 +130,37 @@ export function ReceiptApp() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [credits, setCredits] = useState<OpenRouterCredits | null>(null);
   const [creditsLoading, setCreditsLoading] = useState(false);
+  const [previewScale, setPreviewScale] = useState(220); // grid cell min width in px
+  const [imagePreviewId, setImagePreviewId] = useState<string | null>(null);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardIndex, setWizardIndex] = useState(0);
+  const [aiRunning, setAiRunning] = useState(false);
+  const [aiProgress, setAiProgress] = useState<{ done: number; total: number }>({
+    done: 0,
+    total: 0,
+  });
   const dragId = useRef<string | null>(null);
   const dateCache = useRef<Record<string, CachedDate>>(loadDateCache());
+  const keyIndexRef = useRef(0);
+  const cancelAIRef = useRef(false);
 
+  const apiKeys = useMemo(() => parseKeys(apiKeysText), [apiKeysText]);
 
-  const pushLog = useCallback(
-    (entry: Omit<LogEntry, "id" | "ts">) => {
-      setLogs((prev) =>
-        [
-          {
-            ...entry,
-            id: crypto.randomUUID(),
-            ts: Date.now(),
-          },
-          ...prev,
-        ].slice(0, 50),
-      );
-    },
-    [],
-  );
+  const pushLog = useCallback((entry: Omit<LogEntry, "id" | "ts">) => {
+    setLogs((prev) =>
+      [
+        { ...entry, id: crypto.randomUUID(), ts: Date.now() },
+        ...prev,
+      ].slice(0, 50),
+    );
+  }, []);
 
   useEffect(() => {
-    const k = localStorage.getItem(API_KEY_STORAGE);
-    if (k) setApiKey(k);
+    const k =
+      localStorage.getItem(API_KEYS_STORAGE) ||
+      localStorage.getItem("openrouter-api-key") ||
+      "";
+    if (k) setApiKeysText(k);
     const m = localStorage.getItem(MODEL_STORAGE);
     if (m) setModel(m);
   }, []);
@@ -158,16 +186,20 @@ export function ReceiptApp() {
     };
     window.addEventListener("error", onErr);
     window.addEventListener("unhandledrejection", onRej);
-
-    // Patch console.error / console.warn
     const origErr = console.error;
     const origWarn = console.warn;
     console.error = (...args: unknown[]) => {
       pushLog({
         level: "error",
         source: "console",
-        message: args.map((a) => (a instanceof Error ? a.message : typeof a === "string" ? a : JSON.stringify(a))).join(" "),
-        stack: args.find((a) => a instanceof Error) instanceof Error ? (args.find((a) => a instanceof Error) as Error).stack : undefined,
+        message: args
+          .map((a) =>
+            a instanceof Error ? a.message : typeof a === "string" ? a : JSON.stringify(a),
+          )
+          .join(" "),
+        stack: args.find((a) => a instanceof Error) instanceof Error
+          ? (args.find((a) => a instanceof Error) as Error).stack
+          : undefined,
       });
       origErr(...args);
     };
@@ -221,7 +253,7 @@ export function ReceiptApp() {
     };
   }, [receipts, globalQuality, pushLog]);
 
-  // Rebuild PDFs (possibly multiple) when compressed data ready
+  // Rebuild PDFs
   useEffect(() => {
     let cancelled = false;
     const ready = receipts.length > 0 && receipts.every((r) => r.compressed);
@@ -277,33 +309,25 @@ export function ReceiptApp() {
 
   const ingestImageFiles = useCallback(
     async (arr: File[]) => {
-      const newOnes: Receipt[] = [];
-      for (const file of arr) {
-        try {
-          const hash = await sha256(file);
-          const cached = dateCache.current[hash];
-          newOnes.push({
-            id: crypto.randomUUID(),
-            hash,
-            name: file.name,
-            originalSize: file.size,
-            file,
-            qualityOverride: null,
-            date: cached?.date ?? undefined,
-            dateSource: cached?.source,
-            aiState: "idle",
-          });
-        } catch (e) {
-          pushLog({
-            level: "error",
-            source: "ingest",
-            message: `${file.name}: ${(e as Error).message}`,
-          });
-        }
-      }
+      const newOnes: Receipt[] = arr.map((file) => {
+        const cacheKey = makeCacheKey(file);
+        const cached = dateCache.current[cacheKey];
+        return {
+          id: crypto.randomUUID(),
+          name: file.name,
+          cacheKey,
+          originalSize: file.size,
+          file,
+          qualityOverride: null,
+          date: cached?.iso ?? undefined,
+          dateRaw: cached?.raw ?? undefined,
+          dateSource: cached?.source,
+          aiState: "idle",
+        };
+      });
       setReceipts((prev) => [...prev, ...newOnes]);
     },
-    [pushLog],
+    [],
   );
 
   const handleFiles = useCallback(
@@ -325,7 +349,9 @@ export function ReceiptApp() {
             continue;
           }
           await ingestImageFiles(extracted);
-          toast.success(`${zipFile.name}: imported ${extracted.length} image${extracted.length === 1 ? "" : "s"}`);
+          toast.success(
+            `${zipFile.name}: imported ${extracted.length} image${extracted.length === 1 ? "" : "s"}`,
+          );
         } catch (e) {
           pushLog({
             level: "error",
@@ -335,7 +361,6 @@ export function ReceiptApp() {
           });
           toast.error(`Archive failed: ${(e as Error).message}`);
         }
-        // archive blob is not retained — it goes out of scope here
       }
     },
     [ingestImageFiles, pushLog],
@@ -361,21 +386,34 @@ export function ReceiptApp() {
     toast.success("Sorted by date");
   };
 
+  const setReceiptDate = useCallback(
+    (id: string, iso: string | null, raw: string | null, source: DateSource) => {
+      setReceipts((prev) =>
+        prev.map((x) =>
+          x.id === id
+            ? {
+                ...x,
+                date: iso ?? undefined,
+                dateRaw: raw ?? undefined,
+                dateSource: source,
+                aiState: "done",
+              }
+            : x,
+        ),
+      );
+      const r = receipts.find((x) => x.id === id);
+      if (r) {
+        dateCache.current[r.cacheKey] = { iso, raw, source };
+        saveDateCache(dateCache.current);
+      }
+    },
+    [receipts],
+  );
+
   const tagSelectedDate = (year: number, month: number) => {
     if (!selectedId) return;
-    const date = `${year}-${String(month).padStart(2, "0")}-01`;
-    setReceipts((prev) =>
-      prev.map((x) =>
-        x.id === selectedId
-          ? { ...x, date, dateSource: "manual", aiState: "done" }
-          : x,
-      ),
-    );
-    const r = receipts.find((x) => x.id === selectedId);
-    if (r) {
-      dateCache.current[r.hash] = { date, source: "manual" };
-      saveDateCache(dateCache.current);
-    }
+    const iso = `${year}-${String(month).padStart(2, "0")}-01`;
+    setReceiptDate(selectedId, iso, `${MONTHS[month - 1]} ${year}`, "manual");
   };
 
   const clearSelectedDate = () => {
@@ -383,23 +421,30 @@ export function ReceiptApp() {
     setReceipts((prev) =>
       prev.map((x) =>
         x.id === selectedId
-          ? { ...x, date: undefined, dateSource: undefined, aiState: "idle" }
+          ? {
+              ...x,
+              date: undefined,
+              dateRaw: undefined,
+              dateSource: undefined,
+              aiState: "idle",
+            }
           : x,
       ),
     );
     const r = receipts.find((x) => x.id === selectedId);
     if (r) {
-      delete dateCache.current[r.hash];
+      delete dateCache.current[r.cacheKey];
       saveDateCache(dateCache.current);
     }
   };
 
   const refreshCredits = useCallback(
     async (silent = false) => {
-      if (!apiKey) return;
+      const key = apiKeys[0];
+      if (!key) return;
       setCreditsLoading(true);
       try {
-        const c = await fetchOpenRouterCredits(apiKey);
+        const c = await fetchOpenRouterCredits(key);
         setCredits(c);
       } catch (e) {
         pushLog({
@@ -412,53 +457,99 @@ export function ReceiptApp() {
         setCreditsLoading(false);
       }
     },
-    [apiKey, pushLog],
+    [apiKeys, pushLog],
   );
 
-  // Auto-load credits on key change
   useEffect(() => {
-    if (apiKey) refreshCredits(true);
-  }, [apiKey, refreshCredits]);
+    if (apiKeys.length) refreshCredits(true);
+  }, [apiKeys, refreshCredits]);
 
+  /** Run AI extraction as a queue with round-robin keys. */
   const runAI = async () => {
-    if (!apiKey) {
-      toast.error("Add your OpenRouter API key first");
+    if (!apiKeys.length) {
+      toast.error("Add at least one OpenRouter API key");
       return;
     }
-    localStorage.setItem(API_KEY_STORAGE, apiKey);
+    localStorage.setItem(API_KEYS_STORAGE, apiKeysText);
     localStorage.setItem(MODEL_STORAGE, model);
+
+    const queue = receipts.filter((r) => !r.date && r.compressed);
+    if (!queue.length) {
+      toast.info("Nothing to extract — all receipts already dated");
+      return;
+    }
+
+    // Mark queued
+    setReceipts((prev) =>
+      prev.map((x) =>
+        queue.some((q) => q.id === x.id) ? { ...x, aiState: "queued" } : x,
+      ),
+    );
+
+    cancelAIRef.current = false;
+    setAiRunning(true);
+    setAiProgress({ done: 0, total: queue.length });
     let processed = 0;
     let fromCache = 0;
-    for (const r of receipts) {
-      if (r.date) continue;
-      const cached = dateCache.current[r.hash];
+
+    for (const r of queue) {
+      if (cancelAIRef.current) break;
+      // Re-check cache (may have been populated by another run)
+      const cached = dateCache.current[r.cacheKey];
       if (cached !== undefined) {
         setReceipts((prev) =>
           prev.map((x) =>
             x.id === r.id
-              ? { ...x, date: cached.date, dateSource: cached.source, aiState: "done" }
+              ? {
+                  ...x,
+                  date: cached.iso ?? undefined,
+                  dateRaw: cached.raw ?? undefined,
+                  dateSource: cached.source,
+                  aiState: "done",
+                }
               : x,
           ),
         );
         fromCache++;
+        setAiProgress((p) => ({ ...p, done: p.done + 1 }));
         continue;
       }
-      if (!r.compressed) continue;
       setReceipts((prev) =>
         prev.map((x) => (x.id === r.id ? { ...x, aiState: "loading" } : x)),
       );
       try {
-        const d = await extractDateWithAI(apiKey, r.compressed.dataUrl, model);
-        dateCache.current[r.hash] = { date: d, source: "ai" };
+        const { result, nextIndex, usedKeyIndex } = await extractDateRoundRobin(
+          apiKeys,
+          keyIndexRef.current,
+          r.compressed!.dataUrl,
+          model,
+        );
+        keyIndexRef.current = nextIndex;
+        dateCache.current[r.cacheKey] = {
+          iso: result.iso,
+          raw: result.raw,
+          source: "ai",
+        };
         saveDateCache(dateCache.current);
         setReceipts((prev) =>
           prev.map((x) =>
             x.id === r.id
-              ? { ...x, date: d, dateSource: "ai", aiState: "done" }
+              ? {
+                  ...x,
+                  date: result.iso ?? undefined,
+                  dateRaw: result.raw ?? undefined,
+                  dateSource: "ai",
+                  aiState: "done",
+                }
               : x,
           ),
         );
         processed++;
+        pushLog({
+          level: "info",
+          source: `openrouter/key#${usedKeyIndex + 1}`,
+          message: `${r.name} → ${result.raw ?? "NONE"} (${result.iso ?? "—"})`,
+        });
       } catch (e) {
         const msg = (e as Error).message;
         pushLog({
@@ -472,7 +563,9 @@ export function ReceiptApp() {
         );
         toast.error(`AI failed: ${msg}`);
       }
+      setAiProgress((p) => ({ ...p, done: p.done + 1 }));
     }
+    setAiRunning(false);
     toast.success(`Extracted ${processed} dates (${fromCache} from cache)`);
     refreshCredits(true);
   };
@@ -508,22 +601,6 @@ export function ReceiptApp() {
     [pdfs],
   );
 
-  // Per-page mapping to PDF index for preview labels
-  const pageToPdfIndex = useMemo(() => {
-    const map: number[] = [];
-    let idx = 0;
-    let remaining = pdfs[0]?.pageCount ?? 0;
-    for (let i = 0; i < receipts.length; i++) {
-      if (remaining <= 0 && idx < pdfs.length - 1) {
-        idx++;
-        remaining = pdfs[idx].pageCount;
-      }
-      map.push(idx);
-      remaining--;
-    }
-    return map;
-  }, [pdfs, receipts.length]);
-
   const downloadPdf = (url: string, name: string) => {
     const a = document.createElement("a");
     a.href = url;
@@ -551,6 +628,16 @@ export function ReceiptApp() {
     return Array.from({ length: YEAR_RANGE }, (_, i) => y - i);
   }, []);
 
+  const previewImage = receipts.find((r) => r.id === imagePreviewId);
+  const wizardReceipt = receipts[wizardIndex];
+
+  const openWizardAt = (id: string) => {
+    const idx = receipts.findIndex((r) => r.id === id);
+    if (idx >= 0) {
+      setWizardIndex(idx);
+      setWizardOpen(true);
+    }
+  };
 
   return (
     <div className="min-h-screen p-4 md:p-8">
@@ -564,18 +651,22 @@ export function ReceiptApp() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2 shadow-sm">
-            <KeyRound className="h-4 w-4 text-muted-foreground" />
-            <Input
-              type="password"
-              placeholder="OpenRouter API key"
-              value={apiKey}
-              onChange={(e) => {
-                setApiKey(e.target.value);
-                localStorage.setItem(API_KEY_STORAGE, e.target.value);
-              }}
-              className="h-8 w-56 border-0 bg-transparent p-0 focus-visible:ring-0"
-            />
+          <div className="flex items-start gap-2 rounded-lg border bg-card px-3 py-2 shadow-sm">
+            <KeyRound className="mt-1.5 h-4 w-4 text-muted-foreground" />
+            <div>
+              <textarea
+                placeholder="OpenRouter API keys (one per line — round-robin)"
+                value={apiKeysText}
+                onChange={(e) => {
+                  setApiKeysText(e.target.value);
+                  localStorage.setItem(API_KEYS_STORAGE, e.target.value);
+                }}
+                className="block h-16 w-72 resize-none border-0 bg-transparent p-0 text-xs font-mono focus-visible:outline-none"
+              />
+              <div className="text-[10px] text-muted-foreground">
+                {apiKeys.length} key{apiKeys.length === 1 ? "" : "s"} loaded
+              </div>
+            </div>
           </div>
           <select
             value={model}
@@ -594,7 +685,7 @@ export function ReceiptApp() {
           </select>
           <div
             className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-xs shadow-sm"
-            title="OpenRouter credits (total / used / remaining)"
+            title="OpenRouter credits (first key)"
           >
             <span className="text-muted-foreground">Credits:</span>
             {credits ? (
@@ -610,12 +701,12 @@ export function ReceiptApp() {
               </span>
             ) : (
               <span className="text-muted-foreground">
-                {apiKey ? "—" : "add key"}
+                {apiKeys.length ? "—" : "add key"}
               </span>
             )}
             <button
               onClick={() => refreshCredits()}
-              disabled={!apiKey || creditsLoading}
+              disabled={!apiKeys.length || creditsLoading}
               className="text-muted-foreground hover:text-foreground disabled:opacity-50"
               title="Refresh"
             >
@@ -656,7 +747,6 @@ export function ReceiptApp() {
                 }}
               />
             </label>
-
           </Card>
 
           <Card className="space-y-4 p-5">
@@ -694,19 +784,65 @@ export function ReceiptApp() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button onClick={runAI} variant="secondary" size="sm" disabled={!receipts.length}>
-                <Sparkles className="mr-1.5 h-4 w-4" /> Extract dates (AI)
+              <Button
+                onClick={runAI}
+                variant="secondary"
+                size="sm"
+                disabled={!receipts.length || aiRunning}
+              >
+                {aiRunning ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                    {aiProgress.done}/{aiProgress.total}
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="mr-1.5 h-4 w-4" /> Extract dates (AI)
+                  </>
+                )}
               </Button>
-              <Button onClick={reorderByDate} variant="secondary" size="sm" disabled={!receipts.length}>
+              {aiRunning && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    cancelAIRef.current = true;
+                  }}
+                >
+                  Stop
+                </Button>
+              )}
+              <Button
+                onClick={() => {
+                  if (!receipts.length) return;
+                  setWizardIndex(0);
+                  setWizardOpen(true);
+                }}
+                variant="secondary"
+                size="sm"
+                disabled={!receipts.length}
+              >
+                <Wand2 className="mr-1.5 h-4 w-4" /> Review wizard
+              </Button>
+              <Button
+                onClick={reorderByDate}
+                variant="secondary"
+                size="sm"
+                disabled={!receipts.length}
+              >
                 <ArrowUpDown className="mr-1.5 h-4 w-4" /> Sort by date
               </Button>
-              <Button onClick={downloadAllPdfs} disabled={!pdfs.length} size="sm" className="ml-auto">
+              <Button
+                onClick={downloadAllPdfs}
+                disabled={!pdfs.length}
+                size="sm"
+                className="ml-auto"
+              >
                 <Download className="mr-1.5 h-4 w-4" />
                 {pdfs.length > 1 ? `Download ${pdfs.length} PDFs` : "Download PDF"}
               </Button>
             </div>
           </Card>
-
 
           {selected && (
             <Card className="space-y-3 p-5">
@@ -784,7 +920,6 @@ export function ReceiptApp() {
             </Card>
           )}
 
-
           <div className="space-y-2">
             {receipts.map((r, i) => (
               <Card
@@ -793,10 +928,10 @@ export function ReceiptApp() {
                 onDragStart={() => handleDragStart(r.id)}
                 onDragOver={(e) => handleDragOver(e, r.id)}
                 onClick={() => setSelectedId(r.id)}
+                onDoubleClick={() => setImagePreviewId(r.id)}
+                title="Double-click to view large"
                 className={`flex cursor-pointer items-center gap-3 p-2 transition ${
-                  selectedId === r.id
-                    ? "ring-2 ring-primary"
-                    : "hover:bg-accent/30"
+                  selectedId === r.id ? "ring-2 ring-primary" : "hover:bg-accent/30"
                 }`}
               >
                 <GripVertical className="h-4 w-4 text-muted-foreground" />
@@ -821,20 +956,46 @@ export function ReceiptApp() {
                         className={`ml-2 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] ${
                           r.dateSource === "ai"
                             ? "bg-primary/15 text-primary"
-                            : "bg-success/15 text-success"
+                            : "bg-emerald-500/15 text-emerald-600"
                         }`}
-                        title={r.dateSource === "ai" ? "Extracted by AI" : "Manually tagged"}
+                        title={
+                          r.dateSource === "ai"
+                            ? `AI · raw: ${r.dateRaw ?? "—"} · iso: ${r.date}`
+                            : "Manually tagged"
+                        }
                       >
-                        {r.dateSource === "ai" ? <Sparkles className="h-2.5 w-2.5" /> : <Tag className="h-2.5 w-2.5" />}
-                        {r.date}
+                        {r.dateSource === "ai" ? (
+                          <Sparkles className="h-2.5 w-2.5" />
+                        ) : (
+                          <Tag className="h-2.5 w-2.5" />
+                        )}
+                        {r.dateRaw || r.date}
                       </span>
                     )}
-
+                    {r.aiState === "queued" && (
+                      <span className="ml-2 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px]">queued</span>
+                    )}
                     {r.aiState === "loading" && (
                       <Loader2 className="ml-2 inline h-3 w-3 animate-spin" />
                     )}
+                    {r.aiState === "error" && (
+                      <span className="ml-2 rounded bg-destructive/15 px-1.5 py-0.5 font-mono text-[10px] text-destructive">
+                        AI error
+                      </span>
+                    )}
                   </p>
                 </div>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setImagePreviewId(r.id);
+                  }}
+                  title="Preview"
+                >
+                  <Maximize2 className="h-4 w-4" />
+                </Button>
                 <Button
                   size="icon"
                   variant="ghost"
@@ -906,9 +1067,7 @@ export function ReceiptApp() {
                           {l.source}
                         </span>
                       </div>
-                      <p className="mt-1 break-words font-mono text-[11px]">
-                        {l.message}
-                      </p>
+                      <p className="mt-1 break-words font-mono text-[11px]">{l.message}</p>
                       {l.stack && (
                         <details className="mt-1">
                           <summary className="cursor-pointer text-[10px] text-muted-foreground">
@@ -927,7 +1086,7 @@ export function ReceiptApp() {
           </Card>
         </div>
 
-        {/* RIGHT: live preview (image-stack, Brave-safe) */}
+        {/* RIGHT: live grid preview */}
         <div className="lg:sticky lg:top-4 lg:self-start">
           <Card className="overflow-hidden">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/30 px-4 py-3">
@@ -951,6 +1110,24 @@ export function ReceiptApp() {
                 </span>
               </div>
             </div>
+
+            <div className="flex items-center gap-3 border-b bg-muted/20 px-4 py-2">
+              <Label className="text-xs text-muted-foreground whitespace-nowrap">
+                Grid scale
+              </Label>
+              <Slider
+                value={[previewScale]}
+                onValueChange={(v) => setPreviewScale(v[0])}
+                min={120}
+                max={500}
+                step={10}
+                className="flex-1"
+              />
+              <span className="font-mono text-xs text-muted-foreground w-12 text-right">
+                {previewScale}px
+              </span>
+            </div>
+
             {pdfs.length > 0 && (
               <div className="space-y-1 border-b bg-muted/20 px-4 py-2">
                 {pdfs.map((p, i) => (
@@ -964,12 +1141,7 @@ export function ReceiptApp() {
                       <span className="font-semibold text-primary">{formatBytes(p.size)}</span>
                     </span>
                     <div className="flex gap-1">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => openPdfInNewTab(p.url)}
-                        title="Open in new tab"
-                      >
+                      <Button size="sm" variant="ghost" onClick={() => openPdfInNewTab(p.url)} title="Open in new tab">
                         <ExternalLink className="h-3 w-3" />
                       </Button>
                       <Button
@@ -978,9 +1150,7 @@ export function ReceiptApp() {
                         onClick={() =>
                           downloadPdf(
                             p.url,
-                            pdfs.length === 1
-                              ? `receipts.pdf`
-                              : `receipts-part${i + 1}.pdf`,
+                            pdfs.length === 1 ? `receipts.pdf` : `receipts-part${i + 1}.pdf`,
                           )
                         }
                         title="Download"
@@ -992,65 +1162,286 @@ export function ReceiptApp() {
                 ))}
               </div>
             )}
-            <div className="max-h-[80vh] space-y-4 overflow-auto bg-muted/40 p-4">
+
+            <div className="max-h-[80vh] overflow-auto bg-muted/40 p-4">
               {receipts.length === 0 ? (
                 <div className="flex h-[60vh] items-center justify-center text-sm text-muted-foreground">
                   Upload receipts to see preview
                 </div>
               ) : (
-                receipts.map((r, i) => (
-                  <div
-                    key={r.id}
-                    className="relative overflow-hidden rounded-md border bg-white shadow-sm"
-                  >
-                    <div className="absolute left-2 top-2 z-10 flex gap-1">
-                      <span className="rounded bg-black/60 px-1.5 py-0.5 font-mono text-[10px] text-white">
-                        Page {i + 1} / {receipts.length}
-                      </span>
-                      {pdfs.length > 1 && pageToPdfIndex[i] !== undefined && (
-                        <span className="rounded bg-primary/80 px-1.5 py-0.5 font-mono text-[10px] text-primary-foreground">
-                          PDF {pageToPdfIndex[i] + 1}
+                <div
+                  className="grid gap-3"
+                  style={{
+                    gridTemplateColumns: `repeat(auto-fill, minmax(${previewScale}px, 1fr))`,
+                  }}
+                >
+                  {receipts.map((r, i) => (
+                    <div
+                      key={r.id}
+                      className="group relative overflow-hidden rounded-md border bg-white shadow-sm cursor-pointer"
+                      onClick={() => setSelectedId(r.id)}
+                      onDoubleClick={() => setImagePreviewId(r.id)}
+                    >
+                      <div className="absolute left-1 top-1 z-10 flex flex-wrap gap-1">
+                        <span className="rounded bg-black/60 px-1.5 py-0.5 font-mono text-[10px] text-white">
+                          {i + 1}
                         </span>
-                      )}
-                      {r.date && (
-                        <span
-                          className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] ${
-                            r.dateSource === "ai"
-                              ? "bg-primary/80 text-primary-foreground"
-                              : "bg-emerald-600/80 text-white"
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openWizardAt(r.id);
+                          }}
+                          className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] transition hover:ring-2 hover:ring-white ${
+                            !r.date
+                              ? "bg-muted-foreground/70 text-white"
+                              : r.dateSource === "ai"
+                                ? "bg-primary/80 text-primary-foreground"
+                                : "bg-emerald-600/80 text-white"
                           }`}
+                          title="Click to tag in wizard"
                         >
                           {r.dateSource === "ai" ? (
                             <Sparkles className="h-2.5 w-2.5" />
                           ) : (
                             <Tag className="h-2.5 w-2.5" />
                           )}
-                          {r.date}
-                        </span>
+                          {r.dateRaw || r.date || "tag…"}
+                        </button>
+                      </div>
+                      <button
+                        className="absolute right-1 top-1 z-10 rounded bg-black/50 p-1 text-white opacity-0 transition group-hover:opacity-100"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setImagePreviewId(r.id);
+                        }}
+                        title="Preview large"
+                      >
+                        <Maximize2 className="h-3 w-3" />
+                      </button>
+                      {r.compressed ? (
+                        <img
+                          src={r.compressed.dataUrl}
+                          alt={`Page ${i + 1}`}
+                          className="block w-full"
+                        />
+                      ) : (
+                        <div className="flex h-32 items-center justify-center text-xs text-muted-foreground">
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Compressing…
+                        </div>
                       )}
                     </div>
-                    {r.compressed ? (
-                      <img
-                        src={r.compressed.dataUrl}
-                        alt={`Page ${i + 1}`}
-                        className="block w-full"
-                      />
-                    ) : (
-                      <div className="flex h-48 items-center justify-center text-xs text-muted-foreground">
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Compressing…
-                      </div>
-                    )}
-                  </div>
-                ))
+                  ))}
+                </div>
               )}
             </div>
             <div className="border-t bg-muted/20 px-4 py-2 text-[11px] text-muted-foreground">
-              Tip: Some browsers (e.g. Brave) block embedded PDF viewers — use
-              the per-file Open / Download buttons above.
+              Tip: double-click any image (or use the icon) for a large preview.
+              Click the date chip to edit in the wizard.
             </div>
-
           </Card>
+        </div>
+      </div>
+
+      {/* Large image preview */}
+      <Dialog open={!!previewImage} onOpenChange={(o) => !o && setImagePreviewId(null)}>
+        <DialogContent className="max-w-5xl">
+          <DialogHeader>
+            <DialogTitle className="font-mono text-sm">
+              {previewImage?.name}
+            </DialogTitle>
+          </DialogHeader>
+          {previewImage?.compressed && (
+            <div className="max-h-[80vh] overflow-auto">
+              <img
+                src={previewImage.compressed.dataUrl}
+                alt={previewImage.name}
+                className="mx-auto block"
+              />
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Review wizard */}
+      <Dialog open={wizardOpen} onOpenChange={setWizardOpen}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Wand2 className="h-4 w-4 text-primary" />
+              Review dates ({wizardIndex + 1} / {receipts.length})
+            </DialogTitle>
+          </DialogHeader>
+          {wizardReceipt && (
+            <WizardStep
+              key={wizardReceipt.id}
+              receipt={wizardReceipt}
+              years={years}
+              onApply={(iso, raw, source) =>
+                setReceiptDate(wizardReceipt.id, iso, raw, source)
+              }
+            />
+          )}
+          <div className="mt-4 flex items-center justify-between gap-2 border-t pt-3">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={wizardIndex === 0}
+              onClick={() => setWizardIndex((i) => Math.max(0, i - 1))}
+            >
+              <ChevronLeft className="mr-1 h-4 w-4" /> Prev
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                if (wizardIndex >= receipts.length - 1) setWizardOpen(false);
+                else setWizardIndex((i) => i + 1);
+              }}
+            >
+              {wizardIndex >= receipts.length - 1 ? (
+                <>
+                  <Check className="mr-1 h-4 w-4" /> Done
+                </>
+              ) : (
+                <>
+                  Approve & Next <ChevronRight className="ml-1 h-4 w-4" />
+                </>
+              )}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function WizardStep({
+  receipt,
+  years,
+  onApply,
+}: {
+  receipt: Receipt;
+  years: number[];
+  onApply: (iso: string | null, raw: string | null, source: DateSource) => void;
+}) {
+  const [iso, setIso] = useState<string>(receipt.date ?? "");
+  const [raw, setRaw] = useState<string>(receipt.dateRaw ?? "");
+
+  useEffect(() => {
+    setIso(receipt.date ?? "");
+    setRaw(receipt.dateRaw ?? "");
+  }, [receipt.id, receipt.date, receipt.dateRaw]);
+
+  const year = iso ? Number(iso.slice(0, 4)) : "";
+  const month = iso ? Number(iso.slice(5, 7)) : "";
+  const day = iso ? Number(iso.slice(8, 10)) : "";
+
+  const setPart = (y: number | "", m: number | "", d: number | "") => {
+    const yy = String(y || new Date().getFullYear()).padStart(4, "0");
+    const mm = String(m || 1).padStart(2, "0");
+    const dd = String(d || 1).padStart(2, "0");
+    setIso(`${yy}-${mm}-${dd}`);
+  };
+
+  return (
+    <div className="grid gap-4 md:grid-cols-[1.2fr_1fr]">
+      <div className="overflow-auto rounded-md border bg-muted/20 max-h-[60vh]">
+        {receipt.compressed ? (
+          <img
+            src={receipt.compressed.dataUrl}
+            alt={receipt.name}
+            className="block w-full"
+          />
+        ) : (
+          <div className="flex h-40 items-center justify-center text-xs text-muted-foreground">
+            Compressing…
+          </div>
+        )}
+      </div>
+      <div className="space-y-3">
+        <div>
+          <p className="truncate font-mono text-xs text-muted-foreground">
+            {receipt.name}
+          </p>
+          {receipt.dateSource && (
+            <p className="text-xs">
+              Source:{" "}
+              <span
+                className={
+                  receipt.dateSource === "ai" ? "text-primary" : "text-emerald-600"
+                }
+              >
+                {receipt.dateSource === "ai" ? "AI extracted" : "Manual"}
+              </span>
+            </p>
+          )}
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Date as printed on receipt</Label>
+          <Input
+            value={raw}
+            onChange={(e) => setRaw(e.target.value)}
+            placeholder="e.g. 03/11/2024 or Nov 3 2024"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Date for sorting (ISO)</Label>
+          <div className="grid grid-cols-3 gap-2">
+            <select
+              className="h-9 rounded-md border bg-card px-2 text-sm"
+              value={year}
+              onChange={(e) => setPart(Number(e.target.value), month || 1, day || 1)}
+            >
+              <option value="">Year</option>
+              {years.map((y) => (
+                <option key={y} value={y}>{y}</option>
+              ))}
+            </select>
+            <select
+              className="h-9 rounded-md border bg-card px-2 text-sm"
+              value={month}
+              onChange={(e) =>
+                setPart(year || years[0], Number(e.target.value), day || 1)
+              }
+            >
+              <option value="">Month</option>
+              {MONTHS.map((name, i) => (
+                <option key={name} value={i + 1}>{name}</option>
+              ))}
+            </select>
+            <select
+              className="h-9 rounded-md border bg-card px-2 text-sm"
+              value={day}
+              onChange={(e) =>
+                setPart(year || years[0], month || 1, Number(e.target.value))
+              }
+            >
+              <option value="">Day</option>
+              {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          </div>
+          <p className="font-mono text-[11px] text-muted-foreground">{iso || "—"}</p>
+        </div>
+        <div className="flex flex-wrap gap-2 pt-2">
+          <Button
+            size="sm"
+            onClick={() =>
+              onApply(iso || null, raw || iso || null, "manual")
+            }
+          >
+            <Check className="mr-1 h-4 w-4" /> Save
+          </Button>
+          {receipt.date && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => onApply(null, null, "manual")}
+            >
+              Clear
+            </Button>
+          )}
         </div>
       </div>
     </div>
