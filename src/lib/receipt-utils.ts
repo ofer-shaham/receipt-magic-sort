@@ -122,20 +122,32 @@ export const FREE_VISION_MODELS = [
   "google/gemini-2.0-flash-exp:free",
 ] as const;
 
+export type AIDateResult = { iso: string | null; raw: string | null };
+
+export class RateLimitError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "RateLimitError";
+  }
+}
+
 export async function extractDateWithAI(
   apiKey: string,
   dataUrl: string,
   model: string = FREE_VISION_MODELS[0],
-): Promise<string | null> {
-  // Crop top 35% to save tokens
+): Promise<AIDateResult> {
+  // Crop top 40% to save tokens
   const img = await loadImage(dataUrl);
-  const cropH = Math.round(img.height * 0.35);
+  const cropH = Math.round(img.height * 0.4);
   const canvas = document.createElement("canvas");
   canvas.width = img.width;
   canvas.height = cropH;
   const ctx = canvas.getContext("2d")!;
   ctx.drawImage(img, 0, 0);
   const cropped = canvas.toDataURL("image/jpeg", 0.7);
+
+  const prompt =
+    'Find the transaction/receipt date. Reply with ONE LINE of JSON: {"raw":"<date EXACTLY as printed on the receipt, preserving order and separators>","iso":"YYYY-MM-DD"}. Be careful not to swap day and month — infer the order from the format on the receipt (e.g. DD/MM/YYYY vs MM/DD/YYYY, or month name). If no date is visible, reply NONE.';
 
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -149,10 +161,7 @@ export async function extractDateWithAI(
         {
           role: "user",
           content: [
-            {
-              type: "text",
-              text: 'Extract the receipt date. Reply ONLY with ISO date YYYY-MM-DD. If no date, reply "NONE".',
-            },
+            { type: "text", text: prompt },
             { type: "image_url", image_url: { url: cropped } },
           ],
         },
@@ -162,11 +171,61 @@ export async function extractDateWithAI(
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
     const msg = json?.error?.message || `HTTP ${res.status}`;
+    if (res.status === 429 || /rate.?limit/i.test(msg)) {
+      throw new RateLimitError(msg);
+    }
     throw new Error(`OpenRouter: ${msg}`);
   }
-  const txt = (json.choices?.[0]?.message?.content ?? "").trim();
-  const match = txt.match(/\d{4}-\d{2}-\d{2}/);
-  return match ? match[0] : null;
+  const txt: string = (json.choices?.[0]?.message?.content ?? "").trim();
+  if (/^NONE/i.test(txt)) return { iso: null, raw: null };
+  // Try JSON
+  const jsonMatch = txt.match(/\{[^}]*\}/);
+  if (jsonMatch) {
+    try {
+      const obj = JSON.parse(jsonMatch[0]);
+      const iso =
+        typeof obj.iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(obj.iso)
+          ? obj.iso
+          : null;
+      const raw = typeof obj.raw === "string" ? obj.raw : null;
+      return { iso, raw: raw ?? iso };
+    } catch {
+      /* fall through */
+    }
+  }
+  const iso = txt.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? null;
+  return { iso, raw: iso };
+}
+
+// Round-robin runner across multiple API keys with rate-limit failover.
+export async function extractDateRoundRobin(
+  keys: string[],
+  startIndex: number,
+  dataUrl: string,
+  model: string,
+): Promise<{ result: AIDateResult; nextIndex: number; usedKeyIndex: number }> {
+  if (!keys.length) throw new Error("No API key configured");
+  let i = startIndex % keys.length;
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt < keys.length; attempt++) {
+    const keyIndex = i;
+    try {
+      const result = await extractDateWithAI(keys[keyIndex], dataUrl, model);
+      return {
+        result,
+        nextIndex: (keyIndex + 1) % keys.length,
+        usedKeyIndex: keyIndex,
+      };
+    } catch (e) {
+      lastErr = e as Error;
+      if (e instanceof RateLimitError) {
+        i = (i + 1) % keys.length;
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr ?? new Error("All keys rate-limited");
 }
 
 export type OpenRouterCredits = {
