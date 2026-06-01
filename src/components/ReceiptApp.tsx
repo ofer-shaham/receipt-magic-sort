@@ -136,6 +136,8 @@ type Settings = {
   reportIncludeFilenames: boolean;
   cooldownAfterFailures: number;
   cooldownSec: number;
+  autoSaveEnabled: boolean;
+  autoSaveIntervalSec: number;
 };
 const DEFAULT_SETTINGS: Settings = {
   minKeyIntervalSec: 0,
@@ -147,6 +149,8 @@ const DEFAULT_SETTINGS: Settings = {
   reportIncludeFilenames: true,
   cooldownAfterFailures: 3,
   cooldownSec: 65,
+  autoSaveEnabled: false,
+  autoSaveIntervalSec: 60,
 };
 
 function loadSettings(): Settings {
@@ -272,6 +276,16 @@ export function ReceiptApp() {
     if (theme === "blue") root.classList.add("theme-blue");
     localStorage.setItem(THEME_STORAGE, theme);
   }, [theme]);
+
+  // Auto-save exported data timer
+  useEffect(() => {
+    if (!settings.autoSaveEnabled || settings.autoSaveIntervalSec <= 0) return;
+    const intervalMs = settings.autoSaveIntervalSec * 1000;
+    const id = setInterval(() => {
+      exportStorage();
+    }, intervalMs);
+    return () => clearInterval(id);
+  }, [settings.autoSaveEnabled, settings.autoSaveIntervalSec]);
 
   // Capture errors
   useEffect(() => {
@@ -941,6 +955,39 @@ export function ReceiptApp() {
                         e.target.value = "";
                       }}
                     />
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-3 border-t pt-3">
+                    <div className="flex items-center gap-2">
+                      <Checkbox
+                        id="autosave"
+                        checked={settings.autoSaveEnabled}
+                        onCheckedChange={(c) =>
+                          setSettings((s) => ({ ...s, autoSaveEnabled: c === true }))
+                        }
+                      />
+                      <Label htmlFor="autosave" className="text-sm">
+                        Auto-save exported data
+                      </Label>
+                    </div>
+                    {settings.autoSaveEnabled && (
+                      <div className="flex items-center gap-2">
+                        <Label className="text-xs text-muted-foreground">Every</Label>
+                        <Input
+                          type="number"
+                          min={5}
+                          max={3600}
+                          value={settings.autoSaveIntervalSec}
+                          onChange={(e) =>
+                            setSettings((s) => ({
+                              ...s,
+                              autoSaveIntervalSec: Math.max(5, Number(e.target.value) || 60),
+                            }))
+                          }
+                          className="h-7 w-20 text-xs"
+                        />
+                        <span className="text-xs text-muted-foreground">seconds</span>
+                      </div>
+                    )}
                   </div>
                 </AccordionContent>
               </AccordionItem>
