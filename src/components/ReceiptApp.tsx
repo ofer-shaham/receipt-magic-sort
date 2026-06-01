@@ -136,6 +136,8 @@ type Settings = {
   reportIncludeFilenames: boolean;
   cooldownAfterFailures: number;
   cooldownSec: number;
+  autoSaveEnabled: boolean;
+  autoSaveIntervalSec: number;
 };
 const DEFAULT_SETTINGS: Settings = {
   minKeyIntervalSec: 0,
@@ -147,6 +149,8 @@ const DEFAULT_SETTINGS: Settings = {
   reportIncludeFilenames: true,
   cooldownAfterFailures: 3,
   cooldownSec: 65,
+  autoSaveEnabled: false,
+  autoSaveIntervalSec: 60,
 };
 
 function loadSettings(): Settings {
