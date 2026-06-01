@@ -1,19 +1,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   buildPdfsWithLimit,
+  buildRenamedArchive,
   compressImage,
   extractDateRoundRobin,
   extractImagesFromArchive,
+  fetchFreeVisionModelsList,
   fetchOpenRouterCredits,
   formatBytes,
   FREE_VISION_MODELS,
+  safeSlug,
+  timestamp,
+  type KeyStatus,
   type OpenRouterCredits,
+  type PdfItem,
 } from "@/lib/receipt-utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Card } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
 import {
   Dialog,
   DialogContent,
@@ -27,7 +40,6 @@ import {
   Sparkles,
   ArrowUpDown,
   X,
-  GripVertical,
   Loader2,
   FileText,
   KeyRound,
@@ -40,11 +52,19 @@ import {
   Wand2,
   ChevronLeft,
   ChevronRight,
-  Check,
+  Plus,
+  Sun,
+  Moon,
+  Droplet,
+  FileDown,
+  Upload as UploadIcon,
+  TableIcon,
   Maximize2,
+  Check,
 } from "lucide-react";
 
 type DateSource = "ai" | "manual";
+type Theme = "light" | "dark" | "blue";
 
 type Receipt = {
   id: string;
@@ -60,9 +80,7 @@ type Receipt = {
     width: number;
     height: number;
   };
-  /** ISO date YYYY-MM-DD used for sorting */
   date?: string | null;
-  /** Original date as printed on the receipt */
   dateRaw?: string | null;
   dateSource?: DateSource;
   aiState: "idle" | "queued" | "loading" | "done" | "error";
@@ -78,16 +96,21 @@ type LogEntry = {
 };
 
 const DATE_CACHE_KEY = "receipt-date-cache-v3";
-const API_KEYS_STORAGE = "openrouter-api-keys";
+const API_KEYS_STORAGE_V2 = "openrouter-api-keys-v2";
 const MODEL_STORAGE = "openrouter-model";
+const MODELS_LIST_STORAGE = "openrouter-models-list";
+const THEME_STORAGE = "receipt-theme";
+const SETTINGS_STORAGE = "receipt-settings-v1";
+const YEAR_START_STORAGE = "receipt-year-start";
+const YEAR_END_STORAGE = "receipt-year-end";
 
-type CachedDate = {
-  iso: string | null;
-  raw: string | null;
-  source?: DateSource;
-};
+type CachedDate = { iso: string | null; raw: string | null; source?: DateSource };
 
-/** Cache key: image filename + size — survives across uploads of identical files. */
+const MONTHS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
 function makeCacheKey(file: { name: string; size: number }) {
   return `${file.name}::${file.size}`;
 }
@@ -96,87 +119,163 @@ function loadDateCache(): Record<string, CachedDate> {
   try {
     const raw = JSON.parse(localStorage.getItem(DATE_CACHE_KEY) || "{}");
     if (raw && typeof raw === "object") return raw as Record<string, CachedDate>;
-    return {};
-  } catch {
-    return {};
-  }
+  } catch {}
+  return {};
 }
 function saveDateCache(c: Record<string, CachedDate>) {
   localStorage.setItem(DATE_CACHE_KEY, JSON.stringify(c));
 }
 
-const MONTHS = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-const YEAR_RANGE = 5;
+type Settings = {
+  minKeyIntervalSec: number;
+  maxPdfSizeMB: number;
+  maxPdfSizeRangeMB: number;
+  showDateLabel: boolean;
+  gridPdf: boolean;
+  gridCols: number;
+  reportIncludeFilenames: boolean;
+  cooldownAfterFailures: number;
+  cooldownSec: number;
+};
+const DEFAULT_SETTINGS: Settings = {
+  minKeyIntervalSec: 0,
+  maxPdfSizeMB: 10,
+  maxPdfSizeRangeMB: 10,
+  showDateLabel: false,
+  gridPdf: false,
+  gridCols: 3,
+  reportIncludeFilenames: true,
+  cooldownAfterFailures: 3,
+  cooldownSec: 65,
+};
 
-function parseKeys(s: string): string[] {
-  return s
-    .split(/[\s,;\n]+/)
-    .map((k) => k.trim())
-    .filter(Boolean);
+function loadSettings(): Settings {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SETTINGS_STORAGE) || "{}");
+    return { ...DEFAULT_SETTINGS, ...raw };
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
+function triggerDownload(blobOrUrl: Blob | string, filename: string) {
+  const url =
+    typeof blobOrUrl === "string" ? blobOrUrl : URL.createObjectURL(blobOrUrl);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  if (typeof blobOrUrl !== "string") setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
 export function ReceiptApp() {
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [globalQuality, setGlobalQuality] = useState(70);
-  const [apiKeysText, setApiKeysText] = useState("");
+  const [apiKeys, setApiKeys] = useState<string[]>([]);
+  const [newKey, setNewKey] = useState("");
+  const [models, setModels] = useState<string[]>([...FREE_VISION_MODELS]);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [model, setModel] = useState<string>(FREE_VISION_MODELS[0]);
-  const [pdfs, setPdfs] = useState<{ url: string; size: number; pageCount: number }[]>([]);
-  const [pdfSizeLimitMB, setPdfSizeLimitMB] = useState(10);
+  const [pdfs, setPdfs] = useState<
+    { url: string; size: number; pageCount: number }[]
+  >([]);
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [building, setBuilding] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [credits, setCredits] = useState<OpenRouterCredits | null>(null);
   const [creditsLoading, setCreditsLoading] = useState(false);
-  const [previewScale, setPreviewScale] = useState(220); // grid cell min width in px
+  const [previewScale, setPreviewScale] = useState(220);
   const [imagePreviewId, setImagePreviewId] = useState<string | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
-  const [wizardIndex, setWizardIndex] = useState(0);
+  const [wizardQueue, setWizardQueue] = useState<string[]>([]);
+  const [wizardPos, setWizardPos] = useState(0);
   const [aiRunning, setAiRunning] = useState(false);
-  const [aiProgress, setAiProgress] = useState<{ done: number; total: number }>({
-    done: 0,
-    total: 0,
-  });
-  const dragId = useRef<string | null>(null);
+  const [aiProgress, setAiProgress] = useState({ done: 0, total: 0 });
+  const [theme, setTheme] = useState<Theme>("light");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [reportOpen, setReportOpen] = useState(false);
+  const [matrixOpen, setMatrixOpen] = useState(false);
+  const [yearStart, setYearStart] = useState(new Date().getFullYear() - 4);
+  const [yearEnd, setYearEnd] = useState(new Date().getFullYear());
+
   const dateCache = useRef<Record<string, CachedDate>>(loadDateCache());
   const keyIndexRef = useRef(0);
+  const keyStateRef = useRef<KeyStatus[]>([]);
   const cancelAIRef = useRef(false);
-
-  const apiKeys = useMemo(() => parseKeys(apiKeysText), [apiKeysText]);
+  const importFileRef = useRef<HTMLInputElement>(null);
 
   const pushLog = useCallback((entry: Omit<LogEntry, "id" | "ts">) => {
     setLogs((prev) =>
-      [
-        { ...entry, id: crypto.randomUUID(), ts: Date.now() },
-        ...prev,
-      ].slice(0, 50),
+      [{ ...entry, id: crypto.randomUUID(), ts: Date.now() }, ...prev].slice(0, 80),
     );
   }, []);
 
+  // Initial load
   useEffect(() => {
-    const k =
-      localStorage.getItem(API_KEYS_STORAGE) ||
-      localStorage.getItem("openrouter-api-key") ||
-      "";
-    if (k) setApiKeysText(k);
+    try {
+      const raw = localStorage.getItem(API_KEYS_STORAGE_V2);
+      if (raw) setApiKeys(JSON.parse(raw));
+      else {
+        // migrate old format
+        const old =
+          localStorage.getItem("openrouter-api-keys") ||
+          localStorage.getItem("openrouter-api-key") ||
+          "";
+        if (old) {
+          const parsed = old.split(/[\s,;\n]+/).map((s) => s.trim()).filter(Boolean);
+          setApiKeys(parsed);
+        }
+      }
+    } catch {}
     const m = localStorage.getItem(MODEL_STORAGE);
     if (m) setModel(m);
+    try {
+      const list = JSON.parse(localStorage.getItem(MODELS_LIST_STORAGE) || "null");
+      if (Array.isArray(list) && list.length) setModels(list);
+    } catch {}
+    setSettings(loadSettings());
+    const t = (localStorage.getItem(THEME_STORAGE) as Theme) || "light";
+    setTheme(t);
+    const ys = Number(localStorage.getItem(YEAR_START_STORAGE));
+    const ye = Number(localStorage.getItem(YEAR_END_STORAGE));
+    if (ys) setYearStart(ys);
+    if (ye) setYearEnd(ye);
   }, []);
 
-  // Capture global errors
   useEffect(() => {
-    const onErr = (e: ErrorEvent) => {
+    localStorage.setItem(API_KEYS_STORAGE_V2, JSON.stringify(apiKeys));
+  }, [apiKeys]);
+  useEffect(() => {
+    localStorage.setItem(SETTINGS_STORAGE, JSON.stringify(settings));
+  }, [settings]);
+  useEffect(() => {
+    localStorage.setItem(YEAR_START_STORAGE, String(yearStart));
+    localStorage.setItem(YEAR_END_STORAGE, String(yearEnd));
+  }, [yearStart, yearEnd]);
+
+  // Theme application
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.remove("dark", "theme-blue");
+    if (theme === "dark") root.classList.add("dark");
+    if (theme === "blue") root.classList.add("theme-blue");
+    localStorage.setItem(THEME_STORAGE, theme);
+  }, [theme]);
+
+  // Capture errors
+  useEffect(() => {
+    const onErr = (e: ErrorEvent) =>
       pushLog({
         level: "error",
         source: `${e.filename || "window"}:${e.lineno || 0}`,
         message: e.message || String(e.error),
         stack: e.error?.stack,
       });
-    };
     const onRej = (e: PromiseRejectionEvent) => {
-      const r = e.reason;
+      const r: any = e.reason;
       pushLog({
         level: "error",
         source: "unhandledrejection",
@@ -186,40 +285,13 @@ export function ReceiptApp() {
     };
     window.addEventListener("error", onErr);
     window.addEventListener("unhandledrejection", onRej);
-    const origErr = console.error;
-    const origWarn = console.warn;
-    console.error = (...args: unknown[]) => {
-      pushLog({
-        level: "error",
-        source: "console",
-        message: args
-          .map((a) =>
-            a instanceof Error ? a.message : typeof a === "string" ? a : JSON.stringify(a),
-          )
-          .join(" "),
-        stack: args.find((a) => a instanceof Error) instanceof Error
-          ? (args.find((a) => a instanceof Error) as Error).stack
-          : undefined,
-      });
-      origErr(...args);
-    };
-    console.warn = (...args: unknown[]) => {
-      pushLog({
-        level: "warn",
-        source: "console",
-        message: args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "),
-      });
-      origWarn(...args);
-    };
     return () => {
       window.removeEventListener("error", onErr);
       window.removeEventListener("unhandledrejection", onRej);
-      console.error = origErr;
-      console.warn = origWarn;
     };
   }, [pushLog]);
 
-  // Recompress when needed
+  // Compress
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -238,13 +310,10 @@ export function ReceiptApp() {
               level: "error",
               source: "compressImage",
               message: `${r.name}: ${(e as Error).message}`,
-              stack: (e as Error).stack,
             });
             updates.push(r);
           }
-        } else {
-          updates.push(r);
-        }
+        } else updates.push(r);
       }
       if (changed && !cancelled) setReceipts(updates);
     })();
@@ -253,12 +322,24 @@ export function ReceiptApp() {
     };
   }, [receipts, globalQuality, pushLog]);
 
-  // Rebuild PDFs
+  // Auto-sorted receipts (display & PDF order)
+  const sortedReceipts = useMemo(() => {
+    const withD = receipts.filter((r) => r.date);
+    const without = receipts.filter((r) => !r.date);
+    withD.sort((a, b) =>
+      sortDir === "asc"
+        ? (a.date! < b.date! ? -1 : 1)
+        : (a.date! > b.date! ? -1 : 1),
+    );
+    return [...withD, ...without];
+  }, [receipts, sortDir]);
+
+  // Rebuild PDFs whenever sorted order, quality, or pdf options change
   useEffect(() => {
     let cancelled = false;
-    const ready = receipts.length > 0 && receipts.every((r) => r.compressed);
+    const ready = sortedReceipts.length > 0 && sortedReceipts.every((r) => r.compressed);
     if (!ready) {
-      if (receipts.length === 0) {
+      if (sortedReceipts.length === 0) {
         setPdfs((prev) => {
           prev.forEach((p) => URL.revokeObjectURL(p.url));
           return [];
@@ -269,11 +350,16 @@ export function ReceiptApp() {
     setBuilding(true);
     (async () => {
       try {
-        const limit = Math.max(1, pdfSizeLimitMB) * 1024 * 1024;
-        const out = await buildPdfsWithLimit(
-          receipts.map((r) => r.compressed!),
-          limit,
-        );
+        const limit = Math.max(1, settings.maxPdfSizeMB) * 1024 * 1024;
+        const items: PdfItem[] = sortedReceipts.map((r) => ({
+          ...r.compressed!,
+          label: r.dateRaw || r.date || "",
+        }));
+        const out = await buildPdfsWithLimit(items, limit, {
+          showLabel: settings.showDateLabel,
+          grid: settings.gridPdf,
+          gridCols: settings.gridCols,
+        });
         if (cancelled) return;
         const next = out.map((p) => {
           const ab = p.bytes.buffer.slice(
@@ -305,30 +391,34 @@ export function ReceiptApp() {
     return () => {
       cancelled = true;
     };
-  }, [receipts, pdfSizeLimitMB, pushLog]);
+  }, [
+    sortedReceipts,
+    settings.maxPdfSizeMB,
+    settings.showDateLabel,
+    settings.gridPdf,
+    settings.gridCols,
+    pushLog,
+  ]);
 
-  const ingestImageFiles = useCallback(
-    async (arr: File[]) => {
-      const newOnes: Receipt[] = arr.map((file) => {
-        const cacheKey = makeCacheKey(file);
-        const cached = dateCache.current[cacheKey];
-        return {
-          id: crypto.randomUUID(),
-          name: file.name,
-          cacheKey,
-          originalSize: file.size,
-          file,
-          qualityOverride: null,
-          date: cached?.iso ?? undefined,
-          dateRaw: cached?.raw ?? undefined,
-          dateSource: cached?.source,
-          aiState: "idle",
-        };
-      });
-      setReceipts((prev) => [...prev, ...newOnes]);
-    },
-    [],
-  );
+  const ingestImageFiles = useCallback(async (arr: File[]) => {
+    const newOnes: Receipt[] = arr.map((file) => {
+      const cacheKey = makeCacheKey(file);
+      const cached = dateCache.current[cacheKey];
+      return {
+        id: crypto.randomUUID(),
+        name: file.name,
+        cacheKey,
+        originalSize: file.size,
+        file,
+        qualityOverride: null,
+        date: cached?.iso ?? undefined,
+        dateRaw: cached?.raw ?? undefined,
+        dateSource: cached?.source,
+        aiState: "idle",
+      };
+    });
+    setReceipts((prev) => [...prev, ...newOnes]);
+  }, []);
 
   const handleFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -349,15 +439,12 @@ export function ReceiptApp() {
             continue;
           }
           await ingestImageFiles(extracted);
-          toast.success(
-            `${zipFile.name}: imported ${extracted.length} image${extracted.length === 1 ? "" : "s"}`,
-          );
+          toast.success(`${zipFile.name}: imported ${extracted.length} image(s)`);
         } catch (e) {
           pushLog({
             level: "error",
             source: "archive",
             message: `${zipFile.name}: ${(e as Error).message}`,
-            stack: (e as Error).stack,
           });
           toast.error(`Archive failed: ${(e as Error).message}`);
         }
@@ -374,16 +461,6 @@ export function ReceiptApp() {
   const removeReceipt = (id: string) => {
     setReceipts((prev) => prev.filter((r) => r.id !== id));
     if (selectedId === id) setSelectedId(null);
-  };
-
-  const reorderByDate = () => {
-    setReceipts((prev) => {
-      const withDates = prev.filter((r) => r.date);
-      const without = prev.filter((r) => !r.date);
-      withDates.sort((a, b) => (a.date! < b.date! ? -1 : 1));
-      return [...withDates, ...without];
-    });
-    toast.success("Sorted by date");
   };
 
   const setReceiptDate = useCallback(
@@ -410,42 +487,13 @@ export function ReceiptApp() {
     [receipts],
   );
 
-  const tagSelectedDate = (year: number, month: number) => {
-    if (!selectedId) return;
-    const iso = `${year}-${String(month).padStart(2, "0")}-01`;
-    setReceiptDate(selectedId, iso, `${MONTHS[month - 1]} ${year}`, "manual");
-  };
-
-  const clearSelectedDate = () => {
-    if (!selectedId) return;
-    setReceipts((prev) =>
-      prev.map((x) =>
-        x.id === selectedId
-          ? {
-              ...x,
-              date: undefined,
-              dateRaw: undefined,
-              dateSource: undefined,
-              aiState: "idle",
-            }
-          : x,
-      ),
-    );
-    const r = receipts.find((x) => x.id === selectedId);
-    if (r) {
-      delete dateCache.current[r.cacheKey];
-      saveDateCache(dateCache.current);
-    }
-  };
-
   const refreshCredits = useCallback(
     async (silent = false) => {
       const key = apiKeys[0];
       if (!key) return;
       setCreditsLoading(true);
       try {
-        const c = await fetchOpenRouterCredits(key);
-        setCredits(c);
+        setCredits(await fetchOpenRouterCredits(key));
       } catch (e) {
         pushLog({
           level: "error",
@@ -464,13 +512,28 @@ export function ReceiptApp() {
     if (apiKeys.length) refreshCredits(true);
   }, [apiKeys, refreshCredits]);
 
-  /** Run AI extraction as a queue with round-robin keys. */
+  const refreshModels = useCallback(async () => {
+    setModelsLoading(true);
+    try {
+      const list = await fetchFreeVisionModelsList();
+      if (list.length) {
+        setModels(list);
+        localStorage.setItem(MODELS_LIST_STORAGE, JSON.stringify(list));
+        toast.success(`Loaded ${list.length} free vision models`);
+      } else toast.warning("No models returned");
+    } catch (e) {
+      toast.error((e as Error).message);
+      pushLog({ level: "error", source: "openrouter/models", message: (e as Error).message });
+    } finally {
+      setModelsLoading(false);
+    }
+  }, [pushLog]);
+
   const runAI = async () => {
     if (!apiKeys.length) {
       toast.error("Add at least one OpenRouter API key");
       return;
     }
-    localStorage.setItem(API_KEYS_STORAGE, apiKeysText);
     localStorage.setItem(MODEL_STORAGE, model);
 
     const queue = receipts.filter((r) => !r.date && r.compressed);
@@ -479,7 +542,6 @@ export function ReceiptApp() {
       return;
     }
 
-    // Mark queued
     setReceipts((prev) =>
       prev.map((x) =>
         queue.some((q) => q.id === x.id) ? { ...x, aiState: "queued" } : x,
@@ -494,7 +556,6 @@ export function ReceiptApp() {
 
     for (const r of queue) {
       if (cancelAIRef.current) break;
-      // Re-check cache (may have been populated by another run)
       const cached = dateCache.current[r.cacheKey];
       if (cached !== undefined) {
         setReceipts((prev) =>
@@ -520,9 +581,15 @@ export function ReceiptApp() {
       try {
         const { result, nextIndex, usedKeyIndex } = await extractDateRoundRobin(
           apiKeys,
+          keyStateRef.current,
           keyIndexRef.current,
           r.compressed!.dataUrl,
           model,
+          {
+            minIntervalMs: settings.minKeyIntervalSec * 1000,
+            cooldownAfterFailures: settings.cooldownAfterFailures,
+            cooldownMs: settings.cooldownSec * 1000,
+          },
         );
         keyIndexRef.current = nextIndex;
         dateCache.current[r.cacheKey] = {
@@ -556,7 +623,6 @@ export function ReceiptApp() {
           level: "error",
           source: `openrouter/${model}`,
           message: `${r.name}: ${msg}`,
-          stack: (e as Error).stack,
         });
         setReceipts((prev) =>
           prev.map((x) => (x.id === r.id ? { ...x, aiState: "error" } : x)),
@@ -570,52 +636,28 @@ export function ReceiptApp() {
     refreshCredits(true);
   };
 
-  const setItemQuality = (id: string, q: number | null) => {
+  const setItemQuality = (id: string, q: number | null) =>
     setReceipts((prev) =>
       prev.map((r) => (r.id === id ? { ...r, qualityOverride: q } : r)),
     );
-  };
-
-  const handleDragStart = (id: string) => (dragId.current = id);
-  const handleDragOver = (e: React.DragEvent, id: string) => {
-    e.preventDefault();
-    if (!dragId.current || dragId.current === id) return;
-    setReceipts((prev) => {
-      const from = prev.findIndex((r) => r.id === dragId.current);
-      const to = prev.findIndex((r) => r.id === id);
-      if (from === -1 || to === -1) return prev;
-      const next = [...prev];
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      return next;
-    });
-  };
 
   const selected = useMemo(
     () => receipts.find((r) => r.id === selectedId),
     [receipts, selectedId],
   );
 
-  const totalPdfSize = useMemo(
-    () => pdfs.reduce((s, p) => s + p.size, 0),
-    [pdfs],
-  );
+  const totalPdfSize = useMemo(() => pdfs.reduce((s, p) => s + p.size, 0), [pdfs]);
 
-  const downloadPdf = (url: string, name: string) => {
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = name;
-    a.click();
-  };
+  const stamp = () => timestamp();
 
   const downloadAllPdfs = () => {
-    const stamp = Date.now();
+    const t = stamp();
     pdfs.forEach((p, i) =>
-      downloadPdf(
+      triggerDownload(
         p.url,
         pdfs.length === 1
-          ? `receipts-${stamp}.pdf`
-          : `receipts-${stamp}-part${i + 1}.pdf`,
+          ? `receipts-${t}.pdf`
+          : `receipts-${t}-part${i + 1}.pdf`,
       ),
     );
   };
@@ -624,65 +666,128 @@ export function ReceiptApp() {
     window.open(url, "_blank", "noopener,noreferrer");
 
   const years = useMemo(() => {
-    const y = new Date().getFullYear();
-    return Array.from({ length: YEAR_RANGE }, (_, i) => y - i);
-  }, []);
+    const a = Math.min(yearStart, yearEnd);
+    const b = Math.max(yearStart, yearEnd);
+    return Array.from({ length: b - a + 1 }, (_, i) => b - i);
+  }, [yearStart, yearEnd]);
 
   const previewImage = receipts.find((r) => r.id === imagePreviewId);
-  const wizardReceipt = receipts[wizardIndex];
 
-  const openWizardAt = (id: string) => {
-    const idx = receipts.findIndex((r) => r.id === id);
-    if (idx >= 0) {
-      setWizardIndex(idx);
-      setWizardOpen(true);
+  const buildWizardQueue = () => {
+    const untagged = receipts.filter((r) => !r.date).map((r) => r.id);
+    const tagged = sortedReceipts.filter((r) => r.date).map((r) => r.id);
+    return [...untagged, ...tagged];
+  };
+  const startWizard = (focusId?: string) => {
+    const q = buildWizardQueue();
+    if (!q.length) return;
+    setWizardQueue(q);
+    setWizardPos(focusId ? Math.max(0, q.indexOf(focusId)) : 0);
+    setWizardOpen(true);
+  };
+  const wizardReceipt = receipts.find((r) => r.id === wizardQueue[wizardPos]);
+
+  // Key management
+  const addKey = () => {
+    const k = newKey.trim();
+    if (!k) return;
+    if (apiKeys.includes(k)) {
+      toast.warning("Key already added");
+      return;
+    }
+    setApiKeys((p) => [...p, k]);
+    setNewKey("");
+  };
+  const removeKey = (i: number) =>
+    setApiKeys((p) => p.filter((_, idx) => idx !== i));
+
+  // Export / import localStorage
+  const exportStorage = () => {
+    const data: Record<string, string> = {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      data[k] = localStorage.getItem(k) ?? "";
+    }
+    triggerDownload(
+      new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
+      `receiptforge-storage-${stamp()}.json`,
+    );
+  };
+  const importStorage = async (file: File) => {
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (!data || typeof data !== "object") throw new Error("Invalid file");
+      for (const [k, v] of Object.entries(data)) {
+        if (typeof v === "string") localStorage.setItem(k, v);
+      }
+      toast.success("Storage imported — reloading");
+      setTimeout(() => location.reload(), 600);
+    } catch (e) {
+      toast.error(`Import failed: ${(e as Error).message}`);
     }
   };
 
+  // Date report
+  const downloadDateReport = () => {
+    const lines = ["date_iso\tdate_raw" + (settings.reportIncludeFilenames ? "\tfilename" : "")];
+    for (const r of sortedReceipts) {
+      const row = [
+        r.date ?? "",
+        (r.dateRaw ?? "").replace(/\t/g, " "),
+        settings.reportIncludeFilenames ? r.name : "",
+      ].filter((_, i) => i < 2 || settings.reportIncludeFilenames);
+      lines.push(row.join("\t"));
+    }
+    triggerDownload(
+      new Blob([lines.join("\n")], { type: "text/tab-separated-values" }),
+      `receipt-dates-${stamp()}.tsv`,
+    );
+  };
+
+  // Renamed-archive export
+  const downloadRenamedArchive = async () => {
+    if (!sortedReceipts.length) return;
+    const items: { blob: Blob; name: string }[] = [];
+    for (const r of sortedReceipts) {
+      const blob: Blob = r.compressed?.blob ?? r.file;
+      const ext = (r.name.match(/\.([a-z0-9]+)$/i)?.[1] || "jpg").toLowerCase();
+      const base = r.date
+        ? `${r.date}_${safeSlug(r.name.replace(/\.[^.]+$/, ""))}`
+        : `undated_${safeSlug(r.name.replace(/\.[^.]+$/, ""))}`;
+      items.push({ blob, name: `${base}.${ext}` });
+    }
+    toast.info("Building archive…");
+    const zip = await buildRenamedArchive(items);
+    triggerDownload(zip, `receipts-renamed-${stamp()}.zip`);
+  };
+
+  // Year×Month matrix data
+  const matrix = useMemo(() => {
+    const out: Record<number, boolean[]> = {};
+    for (const r of receipts) {
+      if (!r.date) continue;
+      const y = Number(r.date.slice(0, 4));
+      const m = Number(r.date.slice(5, 7));
+      if (!out[y]) out[y] = Array(12).fill(false);
+      out[y][m - 1] = true;
+    }
+    return out;
+  }, [receipts]);
+
   return (
     <div className="min-h-screen p-4 md:p-8">
-      <header className="mx-auto mb-6 flex max-w-[1600px] flex-wrap items-center justify-between gap-3">
+      <header className="mx-auto mb-4 flex max-w-[1600px] flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">
             Receipt<span className="text-primary">Forge</span>
           </h1>
           <p className="text-sm text-muted-foreground">
-            Compress, sort, and export receipts to a single PDF.
+            Compress, sort, and export receipts to PDF.
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-start gap-2 rounded-lg border bg-card px-3 py-2 shadow-sm">
-            <KeyRound className="mt-1.5 h-4 w-4 text-muted-foreground" />
-            <div>
-              <textarea
-                placeholder="OpenRouter API keys (one per line — round-robin)"
-                value={apiKeysText}
-                onChange={(e) => {
-                  setApiKeysText(e.target.value);
-                  localStorage.setItem(API_KEYS_STORAGE, e.target.value);
-                }}
-                className="block h-16 w-72 resize-none border-0 bg-transparent p-0 text-xs font-mono focus-visible:outline-none"
-              />
-              <div className="text-[10px] text-muted-foreground">
-                {apiKeys.length} key{apiKeys.length === 1 ? "" : "s"} loaded
-              </div>
-            </div>
-          </div>
-          <select
-            value={model}
-            onChange={(e) => {
-              setModel(e.target.value);
-              localStorage.setItem(MODEL_STORAGE, e.target.value);
-            }}
-            className="h-10 rounded-lg border bg-card px-2 text-xs shadow-sm"
-            title="Free vision model"
-          >
-            {FREE_VISION_MODELS.map((m) => (
-              <option key={m} value={m}>
-                {m.replace(":free", "")}
-              </option>
-            ))}
-          </select>
+        <div className="flex items-center gap-2">
           <div
             className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-xs shadow-sm"
             title="OpenRouter credits (first key)"
@@ -694,9 +799,7 @@ export function ReceiptApp() {
                   ${credits.remaining.toFixed(4)}
                 </span>
                 <span className="text-muted-foreground">
-                  {" "}
-                  / ${credits.totalCredits.toFixed(2)} (used $
-                  {credits.totalUsage.toFixed(4)})
+                  {" "}/ ${credits.totalCredits.toFixed(2)}
                 </span>
               </span>
             ) : (
@@ -710,9 +813,30 @@ export function ReceiptApp() {
               className="text-muted-foreground hover:text-foreground disabled:opacity-50"
               title="Refresh"
             >
-              <RefreshCw
-                className={`h-3 w-3 ${creditsLoading ? "animate-spin" : ""}`}
-              />
+              <RefreshCw className={`h-3 w-3 ${creditsLoading ? "animate-spin" : ""}`} />
+            </button>
+          </div>
+          <div className="flex items-center rounded-lg border bg-card p-1 shadow-sm">
+            <button
+              onClick={() => setTheme("light")}
+              className={`rounded px-2 py-1 ${theme === "light" ? "bg-accent" : ""}`}
+              title="Light"
+            >
+              <Sun className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => setTheme("dark")}
+              className={`rounded px-2 py-1 ${theme === "dark" ? "bg-accent" : ""}`}
+              title="Dark"
+            >
+              <Moon className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => setTheme("blue")}
+              className={`rounded px-2 py-1 ${theme === "blue" ? "bg-accent" : ""}`}
+              title="Blue"
+            >
+              <Droplet className="h-3.5 w-3.5" />
             </button>
           </div>
         </div>
@@ -733,7 +857,7 @@ export function ReceiptApp() {
               <div>
                 <p className="font-medium">Drop receipts, ZIP archives, or click to upload</p>
                 <p className="flex items-center justify-center gap-1 text-xs text-muted-foreground">
-                  JPG, PNG, WebP · <Archive className="h-3 w-3" /> ZIP archives (extracted in-memory)
+                  JPG, PNG, WebP · <Archive className="h-3 w-3" /> ZIP (in-memory)
                 </p>
               </div>
               <input
@@ -749,99 +873,326 @@ export function ReceiptApp() {
             </label>
           </Card>
 
-          <Card className="space-y-4 p-5">
-            <div>
-              <div className="mb-2 flex items-center justify-between">
-                <Label className="text-sm">Global quality</Label>
-                <span className="font-mono text-sm font-semibold text-primary">
-                  {globalQuality}%
-                </span>
-              </div>
-              <Slider
-                value={[globalQuality]}
-                onValueChange={(v) => setGlobalQuality(v[0])}
-                min={5}
-                max={100}
-                step={5}
-              />
-            </div>
-            <div>
-              <div className="mb-2 flex items-center justify-between">
-                <Label className="text-sm">Max PDF size</Label>
-                <span className="font-mono text-sm font-semibold text-primary">
-                  {pdfSizeLimitMB} MB
-                </span>
-              </div>
-              <Slider
-                value={[pdfSizeLimitMB]}
-                onValueChange={(v) => setPdfSizeLimitMB(v[0])}
-                min={1}
-                max={50}
-                step={1}
-              />
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                Larger sets are split across multiple PDFs to stay under the limit.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                onClick={runAI}
-                variant="secondary"
-                size="sm"
-                disabled={!receipts.length || aiRunning}
-              >
-                {aiRunning ? (
-                  <>
-                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                    {aiProgress.done}/{aiProgress.total}
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="mr-1.5 h-4 w-4" /> Extract dates (AI)
-                  </>
-                )}
-              </Button>
-              {aiRunning && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => {
-                    cancelAIRef.current = true;
-                  }}
-                >
-                  Stop
-                </Button>
-              )}
-              <Button
-                onClick={() => {
-                  if (!receipts.length) return;
-                  setWizardIndex(0);
-                  setWizardOpen(true);
-                }}
-                variant="secondary"
-                size="sm"
-                disabled={!receipts.length}
-              >
-                <Wand2 className="mr-1.5 h-4 w-4" /> Review wizard
-              </Button>
-              <Button
-                onClick={reorderByDate}
-                variant="secondary"
-                size="sm"
-                disabled={!receipts.length}
-              >
-                <ArrowUpDown className="mr-1.5 h-4 w-4" /> Sort by date
-              </Button>
-              <Button
-                onClick={downloadAllPdfs}
-                disabled={!pdfs.length}
-                size="sm"
-                className="ml-auto"
-              >
-                <Download className="mr-1.5 h-4 w-4" />
-                {pdfs.length > 1 ? `Download ${pdfs.length} PDFs` : "Download PDF"}
-              </Button>
-            </div>
+          <Card className="p-3">
+            <Accordion type="multiple" defaultValue={["actions"]}>
+              <AccordionItem value="actions">
+                <AccordionTrigger className="py-2">Actions</AccordionTrigger>
+                <AccordionContent>
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={runAI} variant="secondary" size="sm" disabled={!receipts.length || aiRunning}>
+                      {aiRunning ? (
+                        <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />{aiProgress.done}/{aiProgress.total}</>
+                      ) : (
+                        <><Sparkles className="mr-1.5 h-4 w-4" /> Extract dates (AI)</>
+                      )}
+                    </Button>
+                    {aiRunning && (
+                      <Button size="sm" variant="ghost" onClick={() => (cancelAIRef.current = true)}>Stop</Button>
+                    )}
+                    <Button onClick={() => startWizard()} variant="secondary" size="sm" disabled={!receipts.length}>
+                      <Wand2 className="mr-1.5 h-4 w-4" /> Review wizard
+                    </Button>
+                    <Button
+                      onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
+                      variant="secondary"
+                      size="sm"
+                      disabled={!receipts.length}
+                      title="Flip sort direction (auto-sorted by date)"
+                    >
+                      <ArrowUpDown className="mr-1.5 h-4 w-4" /> {sortDir === "asc" ? "Asc" : "Desc"}
+                    </Button>
+                    <Button onClick={downloadAllPdfs} disabled={!pdfs.length} size="sm" className="ml-auto">
+                      <Download className="mr-1.5 h-4 w-4" />
+                      {pdfs.length > 1 ? `Download ${pdfs.length} PDFs` : "Download PDF"}
+                    </Button>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2 border-t pt-3">
+                    <Button size="sm" variant="outline" onClick={() => setReportOpen(true)} disabled={!receipts.length}>
+                      <FileDown className="mr-1 h-3 w-3" /> Date report
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setMatrixOpen(true)} disabled={!receipts.length}>
+                      <TableIcon className="mr-1 h-3 w-3" /> Year/Month matrix
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={downloadRenamedArchive} disabled={!receipts.length}>
+                      <Archive className="mr-1 h-3 w-3" /> Renamed ZIP
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={exportStorage}>
+                      <FileDown className="mr-1 h-3 w-3" /> Export data
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => importFileRef.current?.click()}>
+                      <UploadIcon className="mr-1 h-3 w-3" /> Import data
+                    </Button>
+                    <input
+                      ref={importFileRef}
+                      type="file"
+                      accept="application/json,.json"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) importStorage(f);
+                        e.target.value = "";
+                      }}
+                    />
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+
+              <AccordionItem value="quality">
+                <AccordionTrigger className="py-2">
+                  Quality & PDF size
+                </AccordionTrigger>
+                <AccordionContent className="space-y-4">
+                  <div>
+                    <div className="mb-2 flex items-center justify-between">
+                      <Label className="text-sm">Global quality</Label>
+                      <span className="font-mono text-sm font-semibold text-primary">{globalQuality}%</span>
+                    </div>
+                    <Slider value={[globalQuality]} onValueChange={(v) => setGlobalQuality(v[0])} min={5} max={100} step={5} />
+                  </div>
+                  <div>
+                    <div className="mb-2 flex items-center justify-between">
+                      <Label className="text-sm">Max PDF size</Label>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-sm font-semibold text-primary">
+                          {settings.maxPdfSizeMB} MB
+                        </span>
+                        <Input
+                          type="number"
+                          min={1}
+                          max={500}
+                          value={settings.maxPdfSizeRangeMB}
+                          onChange={(e) =>
+                            setSettings((s) => ({
+                              ...s,
+                              maxPdfSizeRangeMB: Math.max(1, Number(e.target.value) || 1),
+                            }))
+                          }
+                          className="h-7 w-20 text-xs"
+                          title="Slider max range (MB)"
+                        />
+                      </div>
+                    </div>
+                    <Slider
+                      value={[Math.min(settings.maxPdfSizeMB, settings.maxPdfSizeRangeMB)]}
+                      onValueChange={(v) => setSettings((s) => ({ ...s, maxPdfSizeMB: v[0] }))}
+                      min={1}
+                      max={settings.maxPdfSizeRangeMB}
+                      step={1}
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="datelbl"
+                      checked={settings.showDateLabel}
+                      onCheckedChange={(c) =>
+                        setSettings((s) => ({ ...s, showDateLabel: c === true }))
+                      }
+                    />
+                    <Label htmlFor="datelbl" className="text-sm">
+                      Add date tag below each image in PDF
+                    </Label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="gridpdf"
+                      checked={settings.gridPdf}
+                      onCheckedChange={(c) =>
+                        setSettings((s) => ({ ...s, gridPdf: c === true }))
+                      }
+                    />
+                    <Label htmlFor="gridpdf" className="text-sm">
+                      Grid PDF (images per page like preview)
+                    </Label>
+                    {settings.gridPdf && (
+                      <Input
+                        type="number"
+                        min={1}
+                        max={6}
+                        value={settings.gridCols}
+                        onChange={(e) =>
+                          setSettings((s) => ({ ...s, gridCols: Math.max(1, Math.min(6, Number(e.target.value) || 3)) }))
+                        }
+                        className="h-7 w-16 text-xs"
+                        title="Columns"
+                      />
+                    )}
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+
+              <AccordionItem value="keys">
+                <AccordionTrigger className="py-2">
+                  <span className="flex items-center gap-2">
+                    <KeyRound className="h-4 w-4" /> OpenRouter API keys ({apiKeys.length})
+                  </span>
+                </AccordionTrigger>
+                <AccordionContent className="space-y-2">
+                  <div className="flex gap-2">
+                    <Input
+                      type="password"
+                      placeholder="sk-or-…"
+                      value={newKey}
+                      onChange={(e) => setNewKey(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && addKey()}
+                      className="text-xs font-mono"
+                    />
+                    <Button size="sm" onClick={addKey}>
+                      <Plus className="mr-1 h-3 w-3" /> Add
+                    </Button>
+                  </div>
+                  {apiKeys.length > 0 && (
+                    <ul className="space-y-1">
+                      {apiKeys.map((k, i) => {
+                        const st = keyStateRef.current[i];
+                        const cooling =
+                          st && st.cooldownUntil > Date.now()
+                            ? Math.ceil((st.cooldownUntil - Date.now()) / 1000)
+                            : 0;
+                        return (
+                          <li
+                            key={i}
+                            className="flex items-center justify-between gap-2 rounded border bg-muted/30 px-2 py-1"
+                          >
+                            <span className="truncate font-mono text-[11px]">
+                              #{i + 1} · {k.slice(0, 10)}…{k.slice(-4)}
+                            </span>
+                            {cooling > 0 && (
+                              <span className="rounded bg-destructive/15 px-1.5 py-0.5 font-mono text-[10px] text-destructive">
+                                cooldown {cooling}s
+                              </span>
+                            )}
+                            <Button size="icon" variant="ghost" onClick={() => removeKey(i)}>
+                              <X className="h-3 w-3" />
+                            </Button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  <div className="flex items-center justify-between gap-2 pt-2">
+                    <Label className="text-xs">Min delay between key uses</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type="number"
+                        min={0}
+                        max={120}
+                        value={settings.minKeyIntervalSec}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            minKeyIntervalSec: Math.max(0, Number(e.target.value) || 0),
+                          }))
+                        }
+                        className="h-7 w-20 text-xs"
+                      />
+                      <span className="text-xs text-muted-foreground">sec</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-xs">Cooldown after N failures</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type="number"
+                        min={1}
+                        value={settings.cooldownAfterFailures}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            cooldownAfterFailures: Math.max(1, Number(e.target.value) || 3),
+                          }))
+                        }
+                        className="h-7 w-16 text-xs"
+                      />
+                      <span className="text-xs text-muted-foreground">→</span>
+                      <Input
+                        type="number"
+                        min={5}
+                        value={settings.cooldownSec}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            cooldownSec: Math.max(5, Number(e.target.value) || 65),
+                          }))
+                        }
+                        className="h-7 w-20 text-xs"
+                      />
+                      <span className="text-xs text-muted-foreground">sec</span>
+                    </div>
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+
+              <AccordionItem value="models">
+                <AccordionTrigger className="py-2">
+                  Model ({models.length} free)
+                </AccordionTrigger>
+                <AccordionContent className="space-y-2">
+                  <div className="flex gap-2">
+                    <select
+                      value={model}
+                      onChange={(e) => {
+                        setModel(e.target.value);
+                        localStorage.setItem(MODEL_STORAGE, e.target.value);
+                      }}
+                      className="h-9 flex-1 rounded-md border bg-card px-2 text-xs"
+                    >
+                      {models.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                    <Button size="sm" variant="outline" onClick={refreshModels} disabled={modelsLoading}>
+                      {modelsLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                      <span className="ml-1">Fetch free</span>
+                    </Button>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Lists active vision-capable models with max_price=0.
+                  </p>
+                </AccordionContent>
+              </AccordionItem>
+
+              <AccordionItem value="years">
+                <AccordionTrigger className="py-2">Manual tag year range</AccordionTrigger>
+                <AccordionContent>
+                  <div className="flex items-center gap-2">
+                    <Label className="text-xs">From</Label>
+                    <Input
+                      type="number"
+                      value={yearStart}
+                      onChange={(e) => setYearStart(Number(e.target.value) || yearStart)}
+                      className="h-7 w-24 text-xs"
+                    />
+                    <Label className="text-xs">To</Label>
+                    <Input
+                      type="number"
+                      value={yearEnd}
+                      onChange={(e) => setYearEnd(Number(e.target.value) || yearEnd)}
+                      className="h-7 w-24 text-xs"
+                    />
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+
+              <AccordionItem value="report-opts">
+                <AccordionTrigger className="py-2">Report options</AccordionTrigger>
+                <AccordionContent>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="rincl"
+                      checked={settings.reportIncludeFilenames}
+                      onCheckedChange={(c) =>
+                        setSettings((s) => ({ ...s, reportIncludeFilenames: c === true }))
+                      }
+                    />
+                    <Label htmlFor="rincl" className="text-sm">
+                      Include filenames in date report
+                    </Label>
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
           </Card>
 
           {selected && (
@@ -863,9 +1214,6 @@ export function ReceiptApp() {
                 <Label className="text-xs text-muted-foreground">Override quality</Label>
                 <span className="font-mono text-sm font-semibold text-primary">
                   {selected.qualityOverride ?? globalQuality}%
-                  {selected.qualityOverride === null && (
-                    <span className="ml-1 text-xs text-muted-foreground">(global)</span>
-                  )}
                 </span>
               </div>
               <Slider
@@ -875,218 +1223,137 @@ export function ReceiptApp() {
                 max={100}
                 step={5}
               />
-              <div className="space-y-2 border-t pt-3">
-                <div className="flex items-center justify-between">
-                  <Label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Tag className="h-3 w-3" /> Manual tag (no AI)
-                  </Label>
-                  {selected.date && (
-                    <Button size="sm" variant="ghost" onClick={clearSelectedDate}>
-                      Clear
-                    </Button>
-                  )}
-                </div>
-                <div className="flex gap-2">
-                  <select
-                    className="h-9 flex-1 rounded-md border bg-card px-2 text-sm"
-                    value={selected.date && selected.dateSource === "manual" ? selected.date.slice(0, 4) : ""}
-                    onChange={(e) => {
-                      const y = Number(e.target.value);
-                      const m = selected.date ? Number(selected.date.slice(5, 7)) : 1;
-                      if (y) tagSelectedDate(y, m);
-                    }}
-                  >
-                    <option value="">Year…</option>
-                    {years.map((y) => (
-                      <option key={y} value={y}>{y}</option>
-                    ))}
-                  </select>
-                  <select
-                    className="h-9 flex-1 rounded-md border bg-card px-2 text-sm"
-                    value={selected.date && selected.dateSource === "manual" ? selected.date.slice(5, 7) : ""}
-                    onChange={(e) => {
-                      const m = Number(e.target.value);
-                      const y = selected.date ? Number(selected.date.slice(0, 4)) : years[0];
-                      if (m) tagSelectedDate(y, m);
-                    }}
-                  >
-                    <option value="">Month…</option>
-                    {MONTHS.map((name, i) => (
-                      <option key={name} value={i + 1}>{name}</option>
-                    ))}
-                  </select>
-                </div>
+              <div className="flex flex-wrap gap-2 border-t pt-3">
+                <Button size="sm" variant="secondary" onClick={() => startWizard(selected.id)}>
+                  <Wand2 className="mr-1 h-3 w-3" /> Open in wizard to tag/edit date
+                </Button>
               </div>
             </Card>
           )}
 
-          <div className="space-y-2">
-            {receipts.map((r, i) => (
-              <Card
-                key={r.id}
-                draggable
-                onDragStart={() => handleDragStart(r.id)}
-                onDragOver={(e) => handleDragOver(e, r.id)}
-                onClick={() => setSelectedId(r.id)}
-                onDoubleClick={() => setImagePreviewId(r.id)}
-                title="Double-click to view large"
-                className={`flex cursor-pointer items-center gap-3 p-2 transition ${
-                  selectedId === r.id ? "ring-2 ring-primary" : "hover:bg-accent/30"
-                }`}
-              >
-                <GripVertical className="h-4 w-4 text-muted-foreground" />
-                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-muted font-mono text-xs font-semibold">
-                  {i + 1}
+          <Accordion type="single" collapsible defaultValue="list">
+            <AccordionItem value="list">
+              <AccordionTrigger className="py-2">
+                Receipts ({receipts.length})
+              </AccordionTrigger>
+              <AccordionContent>
+                <div className="space-y-2">
+                  {sortedReceipts.map((r, i) => (
+                    <Card
+                      key={r.id}
+                      onClick={() => setSelectedId(r.id)}
+                      onDoubleClick={() => setImagePreviewId(r.id)}
+                      title="Double-click to view large"
+                      className={`flex cursor-pointer items-center gap-3 p-2 transition ${
+                        selectedId === r.id ? "ring-2 ring-primary" : "hover:bg-accent/30"
+                      }`}
+                    >
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-muted font-mono text-xs font-semibold">
+                        {i + 1}
+                      </div>
+                      {r.compressed && (
+                        <img src={r.compressed.dataUrl} alt={r.name} className="h-12 w-12 rounded-md object-cover" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium">{r.name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {r.compressed
+                            ? `${formatBytes(r.compressed.blob.size)} · ${r.compressed.quality}%`
+                            : "Compressing…"}
+                          {r.date && (
+                            <span
+                              className={`ml-2 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                                r.dateSource === "ai"
+                                  ? "bg-primary/15 text-primary"
+                                  : "bg-emerald-500/15 text-emerald-600"
+                              }`}
+                              title={r.dateSource === "ai" ? "AI extracted" : "Manually tagged"}
+                            >
+                              {r.dateSource === "ai" ? (
+                                <Sparkles className="h-2.5 w-2.5" />
+                              ) : (
+                                <Tag className="h-2.5 w-2.5" />
+                              )}
+                              {r.dateRaw || r.date}
+                            </span>
+                          )}
+                          {r.aiState === "queued" && (
+                            <span className="ml-2 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px]">queued</span>
+                          )}
+                          {r.aiState === "loading" && <Loader2 className="ml-2 inline h-3 w-3 animate-spin" />}
+                          {r.aiState === "error" && (
+                            <span className="ml-2 rounded bg-destructive/15 px-1.5 py-0.5 font-mono text-[10px] text-destructive">
+                              AI error
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                      <Button size="icon" variant="ghost" onClick={(e) => { e.stopPropagation(); setImagePreviewId(r.id); }} title="Preview">
+                        <Maximize2 className="h-4 w-4" />
+                      </Button>
+                      <Button size="icon" variant="ghost" onClick={(e) => { e.stopPropagation(); removeReceipt(r.id); }}>
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </Card>
+                  ))}
+                  {!receipts.length && (
+                    <p className="py-6 text-center text-sm text-muted-foreground">No receipts yet.</p>
+                  )}
                 </div>
-                {r.compressed && (
-                  <img
-                    src={r.compressed.dataUrl}
-                    alt={r.name}
-                    className="h-12 w-12 rounded-md object-cover"
-                  />
-                )}
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{r.name}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {r.compressed
-                      ? `${formatBytes(r.compressed.blob.size)} · ${r.compressed.quality}%`
-                      : "Compressing…"}
-                    {r.date && (
-                      <span
-                        className={`ml-2 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] ${
-                          r.dateSource === "ai"
-                            ? "bg-primary/15 text-primary"
-                            : "bg-emerald-500/15 text-emerald-600"
-                        }`}
-                        title={
-                          r.dateSource === "ai"
-                            ? `AI · raw: ${r.dateRaw ?? "—"} · iso: ${r.date}`
-                            : "Manually tagged"
-                        }
-                      >
-                        {r.dateSource === "ai" ? (
-                          <Sparkles className="h-2.5 w-2.5" />
-                        ) : (
-                          <Tag className="h-2.5 w-2.5" />
-                        )}
-                        {r.dateRaw || r.date}
-                      </span>
-                    )}
-                    {r.aiState === "queued" && (
-                      <span className="ml-2 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px]">queued</span>
-                    )}
-                    {r.aiState === "loading" && (
-                      <Loader2 className="ml-2 inline h-3 w-3 animate-spin" />
-                    )}
-                    {r.aiState === "error" && (
-                      <span className="ml-2 rounded bg-destructive/15 px-1.5 py-0.5 font-mono text-[10px] text-destructive">
-                        AI error
-                      </span>
-                    )}
-                  </p>
-                </div>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setImagePreviewId(r.id);
-                  }}
-                  title="Preview"
-                >
-                  <Maximize2 className="h-4 w-4" />
-                </Button>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    removeReceipt(r.id);
-                  }}
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              </Card>
-            ))}
-            {!receipts.length && (
-              <p className="py-6 text-center text-sm text-muted-foreground">
-                No receipts yet.
-              </p>
-            )}
-          </div>
+              </AccordionContent>
+            </AccordionItem>
 
-          {/* Error / Log panel */}
-          <Card className="overflow-hidden">
-            <div className="flex items-center justify-between border-b bg-muted/30 px-4 py-2">
-              <div className="flex items-center gap-2">
-                <AlertTriangle
-                  className={`h-4 w-4 ${
-                    logs.some((l) => l.level === "error")
-                      ? "text-destructive"
-                      : "text-muted-foreground"
-                  }`}
-                />
-                <span className="text-sm font-semibold">
+            <AccordionItem value="logs">
+              <AccordionTrigger className="py-2">
+                <span className="flex items-center gap-2">
+                  <AlertTriangle
+                    className={`h-4 w-4 ${logs.some((l) => l.level === "error") ? "text-destructive" : "text-muted-foreground"}`}
+                  />
                   Errors & logs ({logs.length})
                 </span>
-              </div>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setLogs([])}
-                disabled={!logs.length}
-              >
-                <Trash2 className="mr-1 h-3 w-3" /> Clear
-              </Button>
-            </div>
-            <div className="max-h-60 overflow-auto">
-              {logs.length === 0 ? (
-                <p className="px-4 py-3 text-xs text-muted-foreground">
-                  No errors. Client and server errors will appear here.
-                </p>
-              ) : (
-                <ul className="divide-y">
-                  {logs.map((l) => (
-                    <li key={l.id} className="px-4 py-2 text-xs">
-                      <div className="flex items-baseline gap-2">
-                        <span
-                          className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase ${
-                            l.level === "error"
-                              ? "bg-destructive/15 text-destructive"
-                              : l.level === "warn"
-                                ? "bg-yellow-500/15 text-yellow-600"
-                                : "bg-muted text-muted-foreground"
-                          }`}
-                        >
-                          {l.level}
-                        </span>
-                        <span className="font-mono text-[10px] text-muted-foreground">
-                          {new Date(l.ts).toLocaleTimeString()}
-                        </span>
-                        <span className="truncate font-mono text-[10px] text-muted-foreground">
-                          {l.source}
-                        </span>
-                      </div>
-                      <p className="mt-1 break-words font-mono text-[11px]">{l.message}</p>
-                      {l.stack && (
-                        <details className="mt-1">
-                          <summary className="cursor-pointer text-[10px] text-muted-foreground">
-                            stack
-                          </summary>
-                          <pre className="mt-1 overflow-auto whitespace-pre-wrap break-words text-[10px] text-muted-foreground">
-                            {l.stack}
-                          </pre>
-                        </details>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </Card>
+              </AccordionTrigger>
+              <AccordionContent>
+                <div className="flex justify-end">
+                  <Button size="sm" variant="ghost" onClick={() => setLogs([])} disabled={!logs.length}>
+                    <Trash2 className="mr-1 h-3 w-3" /> Clear
+                  </Button>
+                </div>
+                <div className="max-h-60 overflow-auto">
+                  {logs.length === 0 ? (
+                    <p className="px-2 py-3 text-xs text-muted-foreground">No errors.</p>
+                  ) : (
+                    <ul className="divide-y">
+                      {logs.map((l) => (
+                        <li key={l.id} className="px-1 py-2 text-xs">
+                          <div className="flex items-baseline gap-2">
+                            <span
+                              className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase ${
+                                l.level === "error"
+                                  ? "bg-destructive/15 text-destructive"
+                                  : l.level === "warn"
+                                    ? "bg-yellow-500/15 text-yellow-600"
+                                    : "bg-muted text-muted-foreground"
+                              }`}
+                            >
+                              {l.level}
+                            </span>
+                            <span className="font-mono text-[10px] text-muted-foreground">
+                              {new Date(l.ts).toLocaleTimeString()}
+                            </span>
+                            <span className="truncate font-mono text-[10px] text-muted-foreground">{l.source}</span>
+                          </div>
+                          <p className="mt-1 break-words font-mono text-[11px]">{l.message}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
         </div>
 
-        {/* RIGHT: live grid preview */}
+        {/* RIGHT */}
         <div className="lg:sticky lg:top-4 lg:self-start">
           <Card className="overflow-hidden">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/30 px-4 py-3">
@@ -1097,63 +1364,48 @@ export function ReceiptApp() {
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 <span className="rounded-md bg-card px-2 py-1 font-mono">
-                  {receipts.length} {receipts.length === 1 ? "page" : "pages"}
+                  {receipts.length} {receipts.length === 1 ? "image" : "images"}
+                </span>
+                <span className="rounded-md bg-card px-2 py-1 font-mono">
+                  {pdfs.reduce((s, p) => s + p.pageCount, 0)} pages
                 </span>
                 <span className="rounded-md bg-card px-2 py-1 font-mono">
                   {pdfs.length} {pdfs.length === 1 ? "PDF" : "PDFs"}
                 </span>
-                <span
-                  className="rounded-md bg-primary/10 px-2 py-1 font-mono font-semibold text-primary"
-                  title="Total size across all generated PDFs"
-                >
+                <span className="rounded-md bg-primary/10 px-2 py-1 font-mono font-semibold text-primary">
                   {formatBytes(totalPdfSize)}
                 </span>
               </div>
             </div>
 
             <div className="flex items-center gap-3 border-b bg-muted/20 px-4 py-2">
-              <Label className="text-xs text-muted-foreground whitespace-nowrap">
-                Grid scale
-              </Label>
-              <Slider
-                value={[previewScale]}
-                onValueChange={(v) => setPreviewScale(v[0])}
-                min={120}
-                max={500}
-                step={10}
-                className="flex-1"
-              />
-              <span className="font-mono text-xs text-muted-foreground w-12 text-right">
-                {previewScale}px
-              </span>
+              <Label className="whitespace-nowrap text-xs text-muted-foreground">Grid scale</Label>
+              <Slider value={[previewScale]} onValueChange={(v) => setPreviewScale(v[0])} min={120} max={500} step={10} className="flex-1" />
+              <span className="w-12 text-right font-mono text-xs text-muted-foreground">{previewScale}px</span>
             </div>
 
             {pdfs.length > 0 && (
               <div className="space-y-1 border-b bg-muted/20 px-4 py-2">
                 {pdfs.map((p, i) => (
-                  <div
-                    key={p.url}
-                    className="flex items-center justify-between gap-2 text-xs"
-                  >
+                  <div key={p.url} className="flex items-center justify-between gap-2 text-xs">
                     <span className="font-mono">
-                      {pdfs.length > 1 ? `Part ${i + 1}` : "PDF"} ·{" "}
-                      {p.pageCount} {p.pageCount === 1 ? "page" : "pages"} ·{" "}
+                      {pdfs.length > 1 ? `Part ${i + 1}` : "PDF"} · {p.pageCount} {p.pageCount === 1 ? "page" : "pages"} ·{" "}
                       <span className="font-semibold text-primary">{formatBytes(p.size)}</span>
                     </span>
                     <div className="flex gap-1">
-                      <Button size="sm" variant="ghost" onClick={() => openPdfInNewTab(p.url)} title="Open in new tab">
+                      <Button size="sm" variant="ghost" onClick={() => openPdfInNewTab(p.url)} title="Open">
                         <ExternalLink className="h-3 w-3" />
                       </Button>
                       <Button
                         size="sm"
                         variant="ghost"
-                        onClick={() =>
-                          downloadPdf(
+                        onClick={() => {
+                          const t = stamp();
+                          triggerDownload(
                             p.url,
-                            pdfs.length === 1 ? `receipts.pdf` : `receipts-part${i + 1}.pdf`,
-                          )
-                        }
-                        title="Download"
+                            pdfs.length === 1 ? `receipts-${t}.pdf` : `receipts-${t}-part${i + 1}.pdf`,
+                          );
+                        }}
                       >
                         <Download className="h-3 w-3" />
                       </Button>
@@ -1164,32 +1416,25 @@ export function ReceiptApp() {
             )}
 
             <div className="max-h-[80vh] overflow-auto bg-muted/40 p-4">
-              {receipts.length === 0 ? (
+              {sortedReceipts.length === 0 ? (
                 <div className="flex h-[60vh] items-center justify-center text-sm text-muted-foreground">
                   Upload receipts to see preview
                 </div>
               ) : (
-                <div
-                  className="grid gap-3"
-                  style={{
-                    gridTemplateColumns: `repeat(auto-fill, minmax(${previewScale}px, 1fr))`,
-                  }}
-                >
-                  {receipts.map((r, i) => (
+                <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${previewScale}px, 1fr))` }}>
+                  {sortedReceipts.map((r, i) => (
                     <div
                       key={r.id}
-                      className="group relative overflow-hidden rounded-md border bg-white shadow-sm cursor-pointer"
+                      className="group relative cursor-pointer overflow-hidden rounded-md border bg-white shadow-sm"
                       onClick={() => setSelectedId(r.id)}
                       onDoubleClick={() => setImagePreviewId(r.id)}
                     >
                       <div className="absolute left-1 top-1 z-10 flex flex-wrap gap-1">
-                        <span className="rounded bg-black/60 px-1.5 py-0.5 font-mono text-[10px] text-white">
-                          {i + 1}
-                        </span>
+                        <span className="rounded bg-black/60 px-1.5 py-0.5 font-mono text-[10px] text-white">{i + 1}</span>
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            openWizardAt(r.id);
+                            startWizard(r.id);
                           }}
                           className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 font-mono text-[10px] transition hover:ring-2 hover:ring-white ${
                             !r.date
@@ -1198,7 +1443,6 @@ export function ReceiptApp() {
                                 ? "bg-primary/80 text-primary-foreground"
                                 : "bg-emerald-600/80 text-white"
                           }`}
-                          title="Click to tag in wizard"
                         >
                           {r.dateSource === "ai" ? (
                             <Sparkles className="h-2.5 w-2.5" />
@@ -1219,15 +1463,10 @@ export function ReceiptApp() {
                         <Maximize2 className="h-3 w-3" />
                       </button>
                       {r.compressed ? (
-                        <img
-                          src={r.compressed.dataUrl}
-                          alt={`Page ${i + 1}`}
-                          className="block w-full"
-                        />
+                        <img src={r.compressed.dataUrl} alt={`Page ${i + 1}`} className="block w-full" />
                       ) : (
                         <div className="flex h-32 items-center justify-center text-xs text-muted-foreground">
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Compressing…
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Compressing…
                         </div>
                       )}
                     </div>
@@ -1236,8 +1475,7 @@ export function ReceiptApp() {
               )}
             </div>
             <div className="border-t bg-muted/20 px-4 py-2 text-[11px] text-muted-foreground">
-              Tip: double-click any image (or use the icon) for a large preview.
-              Click the date chip to edit in the wizard.
+              Auto-sorted by date {sortDir === "asc" ? "↑" : "↓"}. Double-click for large preview. Click date chip to edit in wizard.
             </div>
           </Card>
         </div>
@@ -1247,29 +1485,24 @@ export function ReceiptApp() {
       <Dialog open={!!previewImage} onOpenChange={(o) => !o && setImagePreviewId(null)}>
         <DialogContent className="max-w-5xl">
           <DialogHeader>
-            <DialogTitle className="font-mono text-sm">
-              {previewImage?.name}
-            </DialogTitle>
+            <DialogTitle className="font-mono text-sm">{previewImage?.name}</DialogTitle>
           </DialogHeader>
           {previewImage?.compressed && (
             <div className="max-h-[80vh] overflow-auto">
-              <img
-                src={previewImage.compressed.dataUrl}
-                alt={previewImage.name}
-                className="mx-auto block"
-              />
+              <img src={previewImage.compressed.dataUrl} alt={previewImage.name} className="mx-auto block" />
             </div>
           )}
         </DialogContent>
       </Dialog>
 
-      {/* Review wizard */}
+      {/* Wizard */}
       <Dialog open={wizardOpen} onOpenChange={setWizardOpen}>
         <DialogContent className="max-w-4xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Wand2 className="h-4 w-4 text-primary" />
-              Review dates ({wizardIndex + 1} / {receipts.length})
+              Review dates ({wizardPos + 1} / {wizardQueue.length})
+              <span className="ml-2 text-xs font-normal text-muted-foreground">untagged first</span>
             </DialogTitle>
           </DialogHeader>
           {wizardReceipt && (
@@ -1277,37 +1510,98 @@ export function ReceiptApp() {
               key={wizardReceipt.id}
               receipt={wizardReceipt}
               years={years}
-              onApply={(iso, raw, source) =>
-                setReceiptDate(wizardReceipt.id, iso, raw, source)
+              onChange={(iso, raw) =>
+                setReceiptDate(wizardReceipt.id, iso, raw, "manual")
               }
+              onClear={() => {
+                setReceipts((prev) =>
+                  prev.map((x) =>
+                    x.id === wizardReceipt.id
+                      ? { ...x, date: undefined, dateRaw: undefined, dateSource: undefined, aiState: "idle" }
+                      : x,
+                  ),
+                );
+                delete dateCache.current[wizardReceipt.cacheKey];
+                saveDateCache(dateCache.current);
+              }}
             />
           )}
           <div className="mt-4 flex items-center justify-between gap-2 border-t pt-3">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={wizardIndex === 0}
-              onClick={() => setWizardIndex((i) => Math.max(0, i - 1))}
-            >
+            <Button variant="outline" size="sm" disabled={wizardPos === 0} onClick={() => setWizardPos((i) => Math.max(0, i - 1))}>
               <ChevronLeft className="mr-1 h-4 w-4" /> Prev
             </Button>
+            <span className="text-xs text-muted-foreground">Changes auto-save</span>
             <Button
               size="sm"
               onClick={() => {
-                if (wizardIndex >= receipts.length - 1) setWizardOpen(false);
-                else setWizardIndex((i) => i + 1);
+                if (wizardPos >= wizardQueue.length - 1) setWizardOpen(false);
+                else setWizardPos((i) => i + 1);
               }}
             >
-              {wizardIndex >= receipts.length - 1 ? (
-                <>
-                  <Check className="mr-1 h-4 w-4" /> Done
-                </>
-              ) : (
-                <>
-                  Approve & Next <ChevronRight className="ml-1 h-4 w-4" />
-                </>
-              )}
+              {wizardPos >= wizardQueue.length - 1 ? "Done" : (<>Next <ChevronRight className="ml-1 h-4 w-4" /></>)}
             </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Date report */}
+      <Dialog open={reportOpen} onOpenChange={setReportOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader><DialogTitle>Date report</DialogTitle></DialogHeader>
+          <div className="max-h-[60vh] overflow-auto rounded-md border">
+            <table className="w-full text-xs">
+              <thead className="bg-muted/40">
+                <tr>
+                  <th className="px-2 py-1 text-left">ISO</th>
+                  <th className="px-2 py-1 text-left">Raw</th>
+                  {settings.reportIncludeFilenames && <th className="px-2 py-1 text-left">Filename</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {sortedReceipts.map((r) => (
+                  <tr key={r.id} className="border-t">
+                    <td className="px-2 py-1 font-mono">{r.date ?? "—"}</td>
+                    <td className="px-2 py-1">{r.dateRaw ?? "—"}</td>
+                    {settings.reportIncludeFilenames && <td className="px-2 py-1 font-mono">{r.name}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <Button size="sm" onClick={downloadDateReport}>
+            <Download className="mr-1 h-3 w-3" /> Download TSV
+          </Button>
+        </DialogContent>
+      </Dialog>
+
+      {/* Matrix */}
+      <Dialog open={matrixOpen} onOpenChange={setMatrixOpen}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader><DialogTitle>Year × Month coverage</DialogTitle></DialogHeader>
+          <div className="max-h-[60vh] overflow-auto rounded-md border">
+            <table className="w-full text-xs">
+              <thead className="bg-muted/40">
+                <tr>
+                  <th className="px-2 py-1 text-left">Year</th>
+                  {MONTHS.map((m) => <th key={m} className="px-2 py-1">{m}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {Object.keys(matrix).map(Number).sort((a, b) => b - a).map((y) => (
+                  <tr key={y} className="border-t">
+                    <td className="px-2 py-1 font-mono font-semibold">{y}</td>
+                    {matrix[y].map((on, i) => (
+                      <td key={i} className="px-2 py-1 text-center">
+                        {on ? <Check className="mx-auto h-3 w-3 text-emerald-600" /> : ""}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+                {Object.keys(matrix).length === 0 && (
+                  <tr><td colSpan={13} className="px-2 py-4 text-center text-muted-foreground">No dated receipts yet.</td></tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </DialogContent>
       </Dialog>
@@ -1318,11 +1612,13 @@ export function ReceiptApp() {
 function WizardStep({
   receipt,
   years,
-  onApply,
+  onChange,
+  onClear,
 }: {
   receipt: Receipt;
   years: number[];
-  onApply: (iso: string | null, raw: string | null, source: DateSource) => void;
+  onChange: (iso: string | null, raw: string | null) => void;
+  onClear: () => void;
 }) {
   const [iso, setIso] = useState<string>(receipt.date ?? "");
   const [raw, setRaw] = useState<string>(receipt.dateRaw ?? "");
@@ -1336,51 +1632,45 @@ function WizardStep({
   const month = iso ? Number(iso.slice(5, 7)) : "";
   const day = iso ? Number(iso.slice(8, 10)) : "";
 
+  // Auto-save on every change.
+  const commit = (newIso: string, newRaw: string) => {
+    setIso(newIso);
+    setRaw(newRaw);
+    onChange(newIso || null, newRaw || newIso || null);
+  };
+
   const setPart = (y: number | "", m: number | "", d: number | "") => {
-    const yy = String(y || new Date().getFullYear()).padStart(4, "0");
+    const yy = String(y || years[0] || new Date().getFullYear()).padStart(4, "0");
     const mm = String(m || 1).padStart(2, "0");
     const dd = String(d || 1).padStart(2, "0");
-    setIso(`${yy}-${mm}-${dd}`);
+    const next = `${yy}-${mm}-${dd}`;
+    commit(next, raw || next);
   };
 
   return (
     <div className="grid gap-4 md:grid-cols-[1.2fr_1fr]">
-      <div className="overflow-auto rounded-md border bg-muted/20 max-h-[60vh]">
+      <div className="max-h-[60vh] overflow-auto rounded-md border bg-muted/20">
         {receipt.compressed ? (
-          <img
-            src={receipt.compressed.dataUrl}
-            alt={receipt.name}
-            className="block w-full"
-          />
+          <img src={receipt.compressed.dataUrl} alt={receipt.name} className="block w-full" />
         ) : (
-          <div className="flex h-40 items-center justify-center text-xs text-muted-foreground">
-            Compressing…
-          </div>
+          <div className="flex h-40 items-center justify-center text-xs text-muted-foreground">Compressing…</div>
         )}
       </div>
       <div className="space-y-3">
-        <div>
-          <p className="truncate font-mono text-xs text-muted-foreground">
-            {receipt.name}
+        <p className="truncate font-mono text-xs text-muted-foreground">{receipt.name}</p>
+        {receipt.dateSource && (
+          <p className="text-xs">
+            Source:{" "}
+            <span className={receipt.dateSource === "ai" ? "text-primary" : "text-emerald-600"}>
+              {receipt.dateSource === "ai" ? "AI extracted" : "Manual"}
+            </span>
           </p>
-          {receipt.dateSource && (
-            <p className="text-xs">
-              Source:{" "}
-              <span
-                className={
-                  receipt.dateSource === "ai" ? "text-primary" : "text-emerald-600"
-                }
-              >
-                {receipt.dateSource === "ai" ? "AI extracted" : "Manual"}
-              </span>
-            </p>
-          )}
-        </div>
+        )}
         <div className="space-y-1">
           <Label className="text-xs">Date as printed on receipt</Label>
           <Input
             value={raw}
-            onChange={(e) => setRaw(e.target.value)}
+            onChange={(e) => commit(iso, e.target.value)}
             placeholder="e.g. 03/11/2024 or Nov 3 2024"
           />
         </div>
@@ -1393,28 +1683,20 @@ function WizardStep({
               onChange={(e) => setPart(Number(e.target.value), month || 1, day || 1)}
             >
               <option value="">Year</option>
-              {years.map((y) => (
-                <option key={y} value={y}>{y}</option>
-              ))}
+              {years.map((y) => <option key={y} value={y}>{y}</option>)}
             </select>
             <select
               className="h-9 rounded-md border bg-card px-2 text-sm"
               value={month}
-              onChange={(e) =>
-                setPart(year || years[0], Number(e.target.value), day || 1)
-              }
+              onChange={(e) => setPart(year || years[0], Number(e.target.value), day || 1)}
             >
               <option value="">Month</option>
-              {MONTHS.map((name, i) => (
-                <option key={name} value={i + 1}>{name}</option>
-              ))}
+              {MONTHS.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
             </select>
             <select
               className="h-9 rounded-md border bg-card px-2 text-sm"
               value={day}
-              onChange={(e) =>
-                setPart(year || years[0], month || 1, Number(e.target.value))
-              }
+              onChange={(e) => setPart(year || years[0], month || 1, Number(e.target.value))}
             >
               <option value="">Day</option>
               {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
@@ -1424,25 +1706,9 @@ function WizardStep({
           </div>
           <p className="font-mono text-[11px] text-muted-foreground">{iso || "—"}</p>
         </div>
-        <div className="flex flex-wrap gap-2 pt-2">
-          <Button
-            size="sm"
-            onClick={() =>
-              onApply(iso || null, raw || iso || null, "manual")
-            }
-          >
-            <Check className="mr-1 h-4 w-4" /> Save
-          </Button>
-          {receipt.date && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => onApply(null, null, "manual")}
-            >
-              Clear
-            </Button>
-          )}
-        </div>
+        {receipt.date && (
+          <Button size="sm" variant="ghost" onClick={onClear}>Clear date</Button>
+        )}
       </div>
     </div>
   );
