@@ -337,7 +337,7 @@ export type RoundRobinOptions = {
 
 export async function extractDateRoundRobin(
   keys: string[],
-  state: KeyStatus[],
+  state: Record<string, KeyStatus>,
   startIndex: number,
   dataUrl: string,
   model: string,
@@ -348,8 +348,14 @@ export async function extractDateRoundRobin(
   const failThreshold = options.cooldownAfterFailures ?? 3;
   const cooldownMs = options.cooldownMs ?? 65_000;
 
-  while (state.length < keys.length)
-    state.push({ failures: 0, cooldownUntil: 0, lastUsedAt: 0 });
+  const getState = (k: string): KeyStatus => {
+    let s = state[k];
+    if (!s) {
+      s = { failures: 0, cooldownUntil: 0, lastUsedAt: 0 };
+      state[k] = s;
+    }
+    return s;
+  };
 
   let i = ((startIndex % keys.length) + keys.length) % keys.length;
   let lastErr: Error | null = null;
@@ -357,7 +363,8 @@ export async function extractDateRoundRobin(
   for (let pass = 0; pass < 2; pass++) {
     for (let attempt = 0; attempt < keys.length; attempt++) {
       const keyIndex = i;
-      const s = state[keyIndex];
+      const key = keys[keyIndex];
+      const s = getState(key);
       const now = Date.now();
       if (s.cooldownUntil > now) {
         i = (i + 1) % keys.length;
@@ -367,7 +374,7 @@ export async function extractDateRoundRobin(
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       s.lastUsedAt = Date.now();
       try {
-        const result = await extractDateWithAI(keys[keyIndex], dataUrl, model);
+        const result = await extractDateWithAI(key, dataUrl, model);
         s.failures = 0;
         return {
           result,
@@ -387,10 +394,13 @@ export async function extractDateRoundRobin(
         i = (i + 1) % keys.length;
       }
     }
-    // all in cooldown? wait for soonest
+    // all in cooldown? wait for soonest among currently-configured keys
     const now2 = Date.now();
     const soonest = Math.min(
-      ...state.map((x) => (x.cooldownUntil > now2 ? x.cooldownUntil - now2 : Infinity)),
+      ...keys.map((k) => {
+        const c = state[k]?.cooldownUntil ?? 0;
+        return c > now2 ? c - now2 : Infinity;
+      }),
     );
     if (!isFinite(soonest)) break;
     await new Promise((r) => setTimeout(r, soonest + 50));
