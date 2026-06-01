@@ -1043,7 +1043,7 @@ export function ReceiptApp() {
                   {apiKeys.length > 0 && (
                     <ul className="space-y-1">
                       {apiKeys.map((k, i) => {
-                        const st = keyStateRef.current[i];
+                        const st = keyStateRef.current[k];
                         const cooling =
                           st && st.cooldownUntil > Date.now()
                             ? Math.ceil((st.cooldownUntil - Date.now()) / 1000)
