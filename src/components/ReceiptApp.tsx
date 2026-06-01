@@ -277,6 +277,16 @@ export function ReceiptApp() {
     localStorage.setItem(THEME_STORAGE, theme);
   }, [theme]);
 
+  // Auto-save exported data timer
+  useEffect(() => {
+    if (!settings.autoSaveEnabled || settings.autoSaveIntervalSec <= 0) return;
+    const intervalMs = settings.autoSaveIntervalSec * 1000;
+    const id = setInterval(() => {
+      exportStorage();
+    }, intervalMs);
+    return () => clearInterval(id);
+  }, [settings.autoSaveEnabled, settings.autoSaveIntervalSec]);
+
   // Capture errors
   useEffect(() => {
     const onErr = (e: ErrorEvent) =>
