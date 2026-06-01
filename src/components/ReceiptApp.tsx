@@ -245,13 +245,21 @@ export function ReceiptApp() {
     if (ye) setYearEnd(ye);
   }, []);
 
+  const hydratedRef = useRef(false);
   useEffect(() => {
+    // mark hydrated after the initial-load effect above has run
+    hydratedRef.current = true;
+  }, []);
+  useEffect(() => {
+    if (!hydratedRef.current) return;
     localStorage.setItem(API_KEYS_STORAGE_V2, JSON.stringify(apiKeys));
   }, [apiKeys]);
   useEffect(() => {
+    if (!hydratedRef.current) return;
     localStorage.setItem(SETTINGS_STORAGE, JSON.stringify(settings));
   }, [settings]);
   useEffect(() => {
+    if (!hydratedRef.current) return;
     localStorage.setItem(YEAR_START_STORAGE, String(yearStart));
     localStorage.setItem(YEAR_END_STORAGE, String(yearEnd));
   }, [yearStart, yearEnd]);
