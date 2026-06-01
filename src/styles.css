@@ -82,6 +82,29 @@
   --ring: oklch(0.7 0.2 265);
 }
 
+.theme-blue {
+  --background: oklch(0.22 0.04 250);
+  --foreground: oklch(0.97 0.01 240);
+  --card: oklch(0.27 0.05 250);
+  --card-foreground: oklch(0.97 0.01 240);
+  --popover: oklch(0.27 0.05 250);
+  --popover-foreground: oklch(0.97 0.01 240);
+  --primary: oklch(0.78 0.16 230);
+  --primary-foreground: oklch(0.18 0.04 250);
+  --secondary: oklch(0.32 0.05 250);
+  --secondary-foreground: oklch(0.97 0.01 240);
+  --muted: oklch(0.32 0.04 250);
+  --muted-foreground: oklch(0.78 0.03 240);
+  --accent: oklch(0.4 0.08 230);
+  --accent-foreground: oklch(0.97 0.01 240);
+  --destructive: oklch(0.65 0.22 25);
+  --destructive-foreground: oklch(0.99 0 0);
+  --success: oklch(0.75 0.17 160);
+  --border: oklch(1 0 0 / 0.12);
+  --input: oklch(1 0 0 / 0.14);
+  --ring: oklch(0.78 0.16 230);
+}
+
 @layer base {
   * { border-color: var(--color-border); }
   body {
