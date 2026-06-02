@@ -937,7 +937,18 @@ export function ReceiptApp() {
           </Card>
 
           <Card className="p-3">
+            <div className="flex justify-end pb-1">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setSettingsDialogOpen(true)}
+                title="Show/hide controls"
+              >
+                <SettingsIcon className="mr-1 h-3.5 w-3.5" /> Controls
+              </Button>
+            </div>
             <Accordion type="multiple" defaultValue={["actions"]}>
+              {settings.visibleSections.actions && (
               <AccordionItem value="actions">
                 <AccordionTrigger className="py-2">Actions</AccordionTrigger>
                 <AccordionContent>
