@@ -224,6 +224,8 @@ export function ReceiptApp() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [reportOpen, setReportOpen] = useState(false);
   const [matrixOpen, setMatrixOpen] = useState(false);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
   const [yearStart, setYearStart] = useState(new Date().getFullYear() - 4);
   const [yearEnd, setYearEnd] = useState(new Date().getFullYear());
 
