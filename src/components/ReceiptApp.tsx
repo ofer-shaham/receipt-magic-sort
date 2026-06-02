@@ -1833,7 +1833,9 @@ function WizardStep({
     const mm = String(m || 1).padStart(2, "0");
     const dd = String(d || 1).padStart(2, "0");
     const next = `${yy}-${mm}-${dd}`;
-    commit(next, raw || next);
+    // Default printed format: DD/MM/YY (matches receipt format)
+    const formattedRaw = `${dd}/${mm}/${yy.slice(2)}`;
+    commit(next, raw || formattedRaw);
   };
 
   return (
