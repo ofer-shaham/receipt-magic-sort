@@ -511,6 +511,21 @@ export function ReceiptApp() {
     if (selectedId === id) setSelectedId(null);
   };
 
+  const toggleExclude = (id: string) => {
+    setReceipts((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, excluded: !r.excluded } : r)),
+    );
+  };
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Copied to clipboard");
+    } catch {
+      toast.error("Copy failed");
+    }
+  };
+
   const setReceiptDate = useCallback(
     (id: string, iso: string | null, raw: string | null, source: DateSource) => {
       setReceipts((prev) =>
