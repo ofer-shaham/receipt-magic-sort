@@ -61,6 +61,9 @@ import {
   TableIcon,
   Maximize2,
   Check,
+  Settings as SettingsIcon,
+  EyeOff,
+  Copy,
 } from "lucide-react";
 
 type DateSource = "ai" | "manual";
@@ -73,6 +76,7 @@ type Receipt = {
   originalSize: number;
   file: File;
   qualityOverride: number | null;
+  excluded?: boolean;
   compressed?: {
     quality: number;
     blob: Blob;
@@ -126,6 +130,14 @@ function saveDateCache(c: Record<string, CachedDate>) {
   localStorage.setItem(DATE_CACHE_KEY, JSON.stringify(c));
 }
 
+type SectionKey =
+  | "actions"
+  | "quality"
+  | "keys"
+  | "models"
+  | "years"
+  | "report-opts";
+
 type Settings = {
   minKeyIntervalSec: number;
   maxPdfSizeMB: number;
@@ -138,6 +150,7 @@ type Settings = {
   cooldownSec: number;
   autoSaveEnabled: boolean;
   autoSaveIntervalSec: number;
+  visibleSections: Record<SectionKey, boolean>;
 };
 const DEFAULT_SETTINGS: Settings = {
   minKeyIntervalSec: 0,
@@ -151,12 +164,24 @@ const DEFAULT_SETTINGS: Settings = {
   cooldownSec: 65,
   autoSaveEnabled: false,
   autoSaveIntervalSec: 60,
+  visibleSections: {
+    actions: true,
+    quality: true,
+    keys: true,
+    models: true,
+    years: true,
+    "report-opts": true,
+  },
 };
 
 function loadSettings(): Settings {
   try {
     const raw = JSON.parse(localStorage.getItem(SETTINGS_STORAGE) || "{}");
-    return { ...DEFAULT_SETTINGS, ...raw };
+    return {
+      ...DEFAULT_SETTINGS,
+      ...raw,
+      visibleSections: { ...DEFAULT_SETTINGS.visibleSections, ...(raw?.visibleSections ?? {}) },
+    };
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -202,6 +227,8 @@ export function ReceiptApp() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [reportOpen, setReportOpen] = useState(false);
   const [matrixOpen, setMatrixOpen] = useState(false);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
   const [yearStart, setYearStart] = useState(new Date().getFullYear() - 4);
   const [yearEnd, setYearEnd] = useState(new Date().getFullYear());
 
@@ -373,10 +400,12 @@ export function ReceiptApp() {
     (async () => {
       try {
         const limit = Math.max(1, settings.maxPdfSizeMB) * 1024 * 1024;
-        const items: PdfItem[] = sortedReceipts.map((r) => ({
-          ...r.compressed!,
-          label: r.dateRaw || r.date || "",
-        }));
+        const items: PdfItem[] = sortedReceipts
+          .filter((r) => !r.excluded)
+          .map((r) => ({
+            ...r.compressed!,
+            label: r.dateRaw || r.date || "",
+          }));
         const out = await buildPdfsWithLimit(items, limit, {
           showLabel: settings.showDateLabel,
           grid: settings.gridPdf,
@@ -483,6 +512,21 @@ export function ReceiptApp() {
   const removeReceipt = (id: string) => {
     setReceipts((prev) => prev.filter((r) => r.id !== id));
     if (selectedId === id) setSelectedId(null);
+  };
+
+  const toggleExclude = (id: string) => {
+    setReceipts((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, excluded: !r.excluded } : r)),
+    );
+  };
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Copied to clipboard");
+    } catch {
+      toast.error("Copy failed");
+    }
   };
 
   const setReceiptDate = useCallback(
@@ -896,7 +940,18 @@ export function ReceiptApp() {
           </Card>
 
           <Card className="p-3">
+            <div className="flex justify-end pb-1">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setSettingsDialogOpen(true)}
+                title="Show/hide controls"
+              >
+                <SettingsIcon className="mr-1 h-3.5 w-3.5" /> Controls
+              </Button>
+            </div>
             <Accordion type="multiple" defaultValue={["actions"]}>
+              {settings.visibleSections.actions && (
               <AccordionItem value="actions">
                 <AccordionTrigger className="py-2">Actions</AccordionTrigger>
                 <AccordionContent>
@@ -991,7 +1046,9 @@ export function ReceiptApp() {
                   </div>
                 </AccordionContent>
               </AccordionItem>
+              )}
 
+              {settings.visibleSections.quality && (
               <AccordionItem value="quality">
                 <AccordionTrigger className="py-2">
                   Quality & PDF size
@@ -1074,7 +1131,9 @@ export function ReceiptApp() {
                   </div>
                 </AccordionContent>
               </AccordionItem>
+              )}
 
+              {settings.visibleSections.keys && (
               <AccordionItem value="keys">
                 <AccordionTrigger className="py-2">
                   <span className="flex items-center gap-2">
@@ -1176,7 +1235,9 @@ export function ReceiptApp() {
                   </div>
                 </AccordionContent>
               </AccordionItem>
+              )}
 
+              {settings.visibleSections.models && (
               <AccordionItem value="models">
                 <AccordionTrigger className="py-2">
                   Model ({models.length} free)
@@ -1207,7 +1268,9 @@ export function ReceiptApp() {
                   </p>
                 </AccordionContent>
               </AccordionItem>
+              )}
 
+              {settings.visibleSections.years && (
               <AccordionItem value="years">
                 <AccordionTrigger className="py-2">Manual tag year range</AccordionTrigger>
                 <AccordionContent>
@@ -1229,7 +1292,9 @@ export function ReceiptApp() {
                   </div>
                 </AccordionContent>
               </AccordionItem>
+              )}
 
+              {settings.visibleSections["report-opts"] && (
               <AccordionItem value="report-opts">
                 <AccordionTrigger className="py-2">Report options</AccordionTrigger>
                 <AccordionContent>
@@ -1247,6 +1312,7 @@ export function ReceiptApp() {
                   </div>
                 </AccordionContent>
               </AccordionItem>
+              )}
             </Accordion>
           </Card>
 
@@ -1368,38 +1434,78 @@ export function ReceiptApp() {
                 </span>
               </AccordionTrigger>
               <AccordionContent>
-                <div className="flex justify-end">
+                <div className="flex justify-end gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      const text = logs
+                        .map(
+                          (l) =>
+                            `[${new Date(l.ts).toISOString()}] ${l.level.toUpperCase()} ${l.source}\n${l.message}${l.stack ? "\n" + l.stack : ""}`,
+                        )
+                        .join("\n\n");
+                      copyToClipboard(text);
+                    }}
+                    disabled={!logs.length}
+                  >
+                    <Copy className="mr-1 h-3 w-3" /> Copy all
+                  </Button>
                   <Button size="sm" variant="ghost" onClick={() => setLogs([])} disabled={!logs.length}>
                     <Trash2 className="mr-1 h-3 w-3" /> Clear
                   </Button>
                 </div>
-                <div className="max-h-60 overflow-auto">
+                <div className="max-h-96 overflow-auto">
                   {logs.length === 0 ? (
                     <p className="px-2 py-3 text-xs text-muted-foreground">No errors.</p>
                   ) : (
                     <ul className="divide-y">
-                      {logs.map((l) => (
-                        <li key={l.id} className="px-1 py-2 text-xs">
-                          <div className="flex items-baseline gap-2">
-                            <span
-                              className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase ${
-                                l.level === "error"
-                                  ? "bg-destructive/15 text-destructive"
-                                  : l.level === "warn"
-                                    ? "bg-yellow-500/15 text-yellow-600"
-                                    : "bg-muted text-muted-foreground"
-                              }`}
-                            >
-                              {l.level}
-                            </span>
-                            <span className="font-mono text-[10px] text-muted-foreground">
-                              {new Date(l.ts).toLocaleTimeString()}
-                            </span>
-                            <span className="truncate font-mono text-[10px] text-muted-foreground">{l.source}</span>
-                          </div>
-                          <p className="mt-1 break-words font-mono text-[11px]">{l.message}</p>
-                        </li>
-                      ))}
+                      {logs.map((l) => {
+                        const expanded = expandedLogId === l.id;
+                        const fullText = `[${new Date(l.ts).toISOString()}] ${l.level.toUpperCase()} ${l.source}\n${l.message}${l.stack ? "\n" + l.stack : ""}`;
+                        return (
+                          <li key={l.id} className="px-1 py-2 text-xs">
+                            <div className="flex items-baseline gap-2">
+                              <span
+                                className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase ${
+                                  l.level === "error"
+                                    ? "bg-destructive/15 text-destructive"
+                                    : l.level === "warn"
+                                      ? "bg-yellow-500/15 text-yellow-600"
+                                      : "bg-muted text-muted-foreground"
+                                }`}
+                              >
+                                {l.level}
+                              </span>
+                              <span className="font-mono text-[10px] text-muted-foreground">
+                                {new Date(l.ts).toLocaleTimeString()}
+                              </span>
+                              <span className="truncate font-mono text-[10px] text-muted-foreground">{l.source}</span>
+                              <button
+                                onClick={() => copyToClipboard(fullText)}
+                                className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                                title="Copy"
+                              >
+                                <Copy className="h-3 w-3" />
+                              </button>
+                              {l.stack && (
+                                <button
+                                  onClick={() => setExpandedLogId(expanded ? null : l.id)}
+                                  className="rounded px-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
+                                >
+                                  {expanded ? "hide" : "stack"}
+                                </button>
+                              )}
+                            </div>
+                            <p className="mt-1 break-words font-mono text-[11px] whitespace-pre-wrap">{l.message}</p>
+                            {expanded && l.stack && (
+                              <pre className="mt-1 max-h-60 overflow-auto rounded bg-muted/40 p-2 font-mono text-[10px] whitespace-pre-wrap break-all">
+                                {l.stack}
+                              </pre>
+                            )}
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </div>
@@ -1480,7 +1586,7 @@ export function ReceiptApp() {
                   {sortedReceipts.map((r, i) => (
                     <div
                       key={r.id}
-                      className="group relative cursor-pointer overflow-hidden rounded-md border bg-white shadow-sm"
+                      className={`group relative cursor-pointer overflow-hidden rounded-md border bg-white shadow-sm ${r.excluded ? "opacity-40 ring-2 ring-destructive/50" : ""}`}
                       onClick={() => setSelectedId(r.id)}
                       onDoubleClick={() => setImagePreviewId(r.id)}
                     >
@@ -1506,17 +1612,44 @@ export function ReceiptApp() {
                           )}
                           {r.dateRaw || r.date || "tag…"}
                         </button>
+                        {r.excluded && (
+                          <span className="rounded bg-destructive/80 px-1.5 py-0.5 font-mono text-[10px] text-white">
+                            excluded
+                          </span>
+                        )}
                       </div>
-                      <button
-                        className="absolute right-1 top-1 z-10 rounded bg-black/50 p-1 text-white opacity-0 transition group-hover:opacity-100"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setImagePreviewId(r.id);
-                        }}
-                        title="Preview large"
-                      >
-                        <Maximize2 className="h-3 w-3" />
-                      </button>
+                      <div className="absolute right-1 top-1 z-10 flex gap-1 opacity-0 transition group-hover:opacity-100">
+                        <button
+                          className="rounded bg-black/50 p-1 text-white hover:bg-black/70"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setImagePreviewId(r.id);
+                          }}
+                          title="Preview large"
+                        >
+                          <Maximize2 className="h-3 w-3" />
+                        </button>
+                        <button
+                          className={`rounded p-1 text-white ${r.excluded ? "bg-emerald-600/80 hover:bg-emerald-600" : "bg-yellow-600/70 hover:bg-yellow-600"}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleExclude(r.id);
+                          }}
+                          title={r.excluded ? "Include in PDF" : "Exclude from PDF"}
+                        >
+                          <EyeOff className="h-3 w-3" />
+                        </button>
+                        <button
+                          className="rounded bg-destructive/80 p-1 text-white hover:bg-destructive"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeReceipt(r.id);
+                          }}
+                          title="Remove image"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
                       {r.compressed ? (
                         <img src={r.compressed.dataUrl} alt={`Page ${i + 1}`} className="block w-full" />
                       ) : (
@@ -1565,9 +1698,10 @@ export function ReceiptApp() {
               key={wizardReceipt.id}
               receipt={wizardReceipt}
               years={years}
-              onChange={(iso, raw) =>
-                setReceiptDate(wizardReceipt.id, iso, raw, "manual")
-              }
+              onChange={(iso, raw) => {
+                setReceiptDate(wizardReceipt.id, iso, raw, "manual");
+                toast.success(iso ? `Saved date: ${raw || iso}` : "Date cleared");
+              }}
               onClear={() => {
                 setReceipts((prev) =>
                   prev.map((x) =>
@@ -1660,6 +1794,45 @@ export function ReceiptApp() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Controls visibility settings */}
+      <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <SettingsIcon className="h-4 w-4" /> Show / hide controls
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-xs text-muted-foreground">
+            Toggle the side-panel sections. Upload, image list and logs are always visible.
+          </p>
+          <div className="space-y-2">
+            {(
+              [
+                ["actions", "Actions (AI, sort, download, export)"],
+                ["quality", "Quality & PDF size"],
+                ["keys", "OpenRouter API keys"],
+                ["models", "Model selector"],
+                ["years", "Manual tag year range"],
+                ["report-opts", "Report options"],
+              ] as [SectionKey, string][]
+            ).map(([k, label]) => (
+              <label key={k} className="flex items-center gap-2 rounded border bg-muted/20 px-3 py-2 text-sm">
+                <Checkbox
+                  checked={settings.visibleSections[k]}
+                  onCheckedChange={(c) =>
+                    setSettings((s) => ({
+                      ...s,
+                      visibleSections: { ...s.visibleSections, [k]: c === true },
+                    }))
+                  }
+                />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -1699,7 +1872,9 @@ function WizardStep({
     const mm = String(m || 1).padStart(2, "0");
     const dd = String(d || 1).padStart(2, "0");
     const next = `${yy}-${mm}-${dd}`;
-    commit(next, raw || next);
+    // Default printed format: DD/MM/YY (matches receipt format)
+    const formattedRaw = `${dd}/${mm}/${yy.slice(2)}`;
+    commit(next, raw || formattedRaw);
   };
 
   return (
