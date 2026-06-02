@@ -1434,38 +1434,78 @@ export function ReceiptApp() {
                 </span>
               </AccordionTrigger>
               <AccordionContent>
-                <div className="flex justify-end">
+                <div className="flex justify-end gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      const text = logs
+                        .map(
+                          (l) =>
+                            `[${new Date(l.ts).toISOString()}] ${l.level.toUpperCase()} ${l.source}\n${l.message}${l.stack ? "\n" + l.stack : ""}`,
+                        )
+                        .join("\n\n");
+                      copyToClipboard(text);
+                    }}
+                    disabled={!logs.length}
+                  >
+                    <Copy className="mr-1 h-3 w-3" /> Copy all
+                  </Button>
                   <Button size="sm" variant="ghost" onClick={() => setLogs([])} disabled={!logs.length}>
                     <Trash2 className="mr-1 h-3 w-3" /> Clear
                   </Button>
                 </div>
-                <div className="max-h-60 overflow-auto">
+                <div className="max-h-96 overflow-auto">
                   {logs.length === 0 ? (
                     <p className="px-2 py-3 text-xs text-muted-foreground">No errors.</p>
                   ) : (
                     <ul className="divide-y">
-                      {logs.map((l) => (
-                        <li key={l.id} className="px-1 py-2 text-xs">
-                          <div className="flex items-baseline gap-2">
-                            <span
-                              className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase ${
-                                l.level === "error"
-                                  ? "bg-destructive/15 text-destructive"
-                                  : l.level === "warn"
-                                    ? "bg-yellow-500/15 text-yellow-600"
-                                    : "bg-muted text-muted-foreground"
-                              }`}
-                            >
-                              {l.level}
-                            </span>
-                            <span className="font-mono text-[10px] text-muted-foreground">
-                              {new Date(l.ts).toLocaleTimeString()}
-                            </span>
-                            <span className="truncate font-mono text-[10px] text-muted-foreground">{l.source}</span>
-                          </div>
-                          <p className="mt-1 break-words font-mono text-[11px]">{l.message}</p>
-                        </li>
-                      ))}
+                      {logs.map((l) => {
+                        const expanded = expandedLogId === l.id;
+                        const fullText = `[${new Date(l.ts).toISOString()}] ${l.level.toUpperCase()} ${l.source}\n${l.message}${l.stack ? "\n" + l.stack : ""}`;
+                        return (
+                          <li key={l.id} className="px-1 py-2 text-xs">
+                            <div className="flex items-baseline gap-2">
+                              <span
+                                className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase ${
+                                  l.level === "error"
+                                    ? "bg-destructive/15 text-destructive"
+                                    : l.level === "warn"
+                                      ? "bg-yellow-500/15 text-yellow-600"
+                                      : "bg-muted text-muted-foreground"
+                                }`}
+                              >
+                                {l.level}
+                              </span>
+                              <span className="font-mono text-[10px] text-muted-foreground">
+                                {new Date(l.ts).toLocaleTimeString()}
+                              </span>
+                              <span className="truncate font-mono text-[10px] text-muted-foreground">{l.source}</span>
+                              <button
+                                onClick={() => copyToClipboard(fullText)}
+                                className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                                title="Copy"
+                              >
+                                <Copy className="h-3 w-3" />
+                              </button>
+                              {l.stack && (
+                                <button
+                                  onClick={() => setExpandedLogId(expanded ? null : l.id)}
+                                  className="rounded px-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
+                                >
+                                  {expanded ? "hide" : "stack"}
+                                </button>
+                              )}
+                            </div>
+                            <p className="mt-1 break-words font-mono text-[11px] whitespace-pre-wrap">{l.message}</p>
+                            {expanded && l.stack && (
+                              <pre className="mt-1 max-h-60 overflow-auto rounded bg-muted/40 p-2 font-mono text-[10px] whitespace-pre-wrap break-all">
+                                {l.stack}
+                              </pre>
+                            )}
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </div>
