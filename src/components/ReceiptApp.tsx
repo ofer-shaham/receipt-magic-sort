@@ -61,6 +61,9 @@ import {
   TableIcon,
   Maximize2,
   Check,
+  Settings as SettingsIcon,
+  EyeOff,
+  Copy,
 } from "lucide-react";
 
 type DateSource = "ai" | "manual";
