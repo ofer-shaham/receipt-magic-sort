@@ -1265,7 +1265,9 @@ export function ReceiptApp() {
                   </p>
                 </AccordionContent>
               </AccordionItem>
+              )}
 
+              {settings.visibleSections.years && (
               <AccordionItem value="years">
                 <AccordionTrigger className="py-2">Manual tag year range</AccordionTrigger>
                 <AccordionContent>
