@@ -275,7 +275,7 @@ export async function extractDateWithAI(
   const cropped = canvas.toDataURL("image/jpeg", 0.7);
 
   const prompt =
-    'Find the transaction/receipt date. Reply with ONE LINE of JSON: {"raw":"<date EXACTLY as printed, preserving order and separators>","iso":"YYYY-MM-DD"}. Infer day/month order from the printed format. If no date is visible, reply NONE.';
+    'Find the transaction/receipt date. The receipts use DD/MM/YY (or DD/MM/YYYY) — day first, month second. Reply with ONE LINE of JSON: {"raw":"DD/MM/YY","iso":"YYYY-MM-DD"}. Always format raw as DD/MM/YY using two-digit day, two-digit month, two-digit year. Do NOT swap day and month. If no date is visible, reply NONE.';
 
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
