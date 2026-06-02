@@ -174,8 +174,15 @@ const DEFAULT_SETTINGS: Settings = {
 function loadSettings(): Settings {
   try {
     const raw = JSON.parse(localStorage.getItem(SETTINGS_STORAGE) || "{}");
-    return { ...DEFAULT_SETTINGS, ...raw };
+    return {
+      ...DEFAULT_SETTINGS,
+      ...raw,
+      visibleSections: { ...DEFAULT_SETTINGS.visibleSections, ...(raw?.visibleSections ?? {}) },
+    };
   } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
     return DEFAULT_SETTINGS;
   }
 }
