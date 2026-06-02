@@ -1232,7 +1232,9 @@ export function ReceiptApp() {
                   </div>
                 </AccordionContent>
               </AccordionItem>
+              )}
 
+              {settings.visibleSections.models && (
               <AccordionItem value="models">
                 <AccordionTrigger className="py-2">
                   Model ({models.length} free)
