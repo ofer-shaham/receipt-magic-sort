@@ -183,9 +183,6 @@ function loadSettings(): Settings {
     return DEFAULT_SETTINGS;
   }
 }
-    return DEFAULT_SETTINGS;
-  }
-}
 
 function triggerDownload(blobOrUrl: Blob | string, filename: string) {
   const url =
