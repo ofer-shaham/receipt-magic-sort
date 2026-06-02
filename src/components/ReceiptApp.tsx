@@ -397,10 +397,12 @@ export function ReceiptApp() {
     (async () => {
       try {
         const limit = Math.max(1, settings.maxPdfSizeMB) * 1024 * 1024;
-        const items: PdfItem[] = sortedReceipts.map((r) => ({
-          ...r.compressed!,
-          label: r.dateRaw || r.date || "",
-        }));
+        const items: PdfItem[] = sortedReceipts
+          .filter((r) => !r.excluded)
+          .map((r) => ({
+            ...r.compressed!,
+            label: r.dateRaw || r.date || "",
+          }));
         const out = await buildPdfsWithLimit(items, limit, {
           showLabel: settings.showDateLabel,
           grid: settings.gridPdf,
