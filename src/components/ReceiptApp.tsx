@@ -1698,9 +1698,10 @@ export function ReceiptApp() {
               key={wizardReceipt.id}
               receipt={wizardReceipt}
               years={years}
-              onChange={(iso, raw) =>
-                setReceiptDate(wizardReceipt.id, iso, raw, "manual")
-              }
+              onChange={(iso, raw) => {
+                setReceiptDate(wizardReceipt.id, iso, raw, "manual");
+                toast.success(iso ? `Saved date: ${raw || iso}` : "Date cleared");
+              }}
               onClear={() => {
                 setReceipts((prev) =>
                   prev.map((x) =>
