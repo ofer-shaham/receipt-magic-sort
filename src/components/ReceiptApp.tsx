@@ -1546,7 +1546,7 @@ export function ReceiptApp() {
                   {sortedReceipts.map((r, i) => (
                     <div
                       key={r.id}
-                      className="group relative cursor-pointer overflow-hidden rounded-md border bg-white shadow-sm"
+                      className={`group relative cursor-pointer overflow-hidden rounded-md border bg-white shadow-sm ${r.excluded ? "opacity-40 ring-2 ring-destructive/50" : ""}`}
                       onClick={() => setSelectedId(r.id)}
                       onDoubleClick={() => setImagePreviewId(r.id)}
                     >
@@ -1572,17 +1572,44 @@ export function ReceiptApp() {
                           )}
                           {r.dateRaw || r.date || "tag…"}
                         </button>
+                        {r.excluded && (
+                          <span className="rounded bg-destructive/80 px-1.5 py-0.5 font-mono text-[10px] text-white">
+                            excluded
+                          </span>
+                        )}
                       </div>
-                      <button
-                        className="absolute right-1 top-1 z-10 rounded bg-black/50 p-1 text-white opacity-0 transition group-hover:opacity-100"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setImagePreviewId(r.id);
-                        }}
-                        title="Preview large"
-                      >
-                        <Maximize2 className="h-3 w-3" />
-                      </button>
+                      <div className="absolute right-1 top-1 z-10 flex gap-1 opacity-0 transition group-hover:opacity-100">
+                        <button
+                          className="rounded bg-black/50 p-1 text-white hover:bg-black/70"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setImagePreviewId(r.id);
+                          }}
+                          title="Preview large"
+                        >
+                          <Maximize2 className="h-3 w-3" />
+                        </button>
+                        <button
+                          className={`rounded p-1 text-white ${r.excluded ? "bg-emerald-600/80 hover:bg-emerald-600" : "bg-yellow-600/70 hover:bg-yellow-600"}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleExclude(r.id);
+                          }}
+                          title={r.excluded ? "Include in PDF" : "Exclude from PDF"}
+                        >
+                          <EyeOff className="h-3 w-3" />
+                        </button>
+                        <button
+                          className="rounded bg-destructive/80 p-1 text-white hover:bg-destructive"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeReceipt(r.id);
+                          }}
+                          title="Remove image"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
                       {r.compressed ? (
                         <img src={r.compressed.dataUrl} alt={`Page ${i + 1}`} className="block w-full" />
                       ) : (
