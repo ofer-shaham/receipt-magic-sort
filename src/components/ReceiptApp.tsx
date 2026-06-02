@@ -1794,6 +1794,45 @@ export function ReceiptApp() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Controls visibility settings */}
+      <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <SettingsIcon className="h-4 w-4" /> Show / hide controls
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-xs text-muted-foreground">
+            Toggle the side-panel sections. Upload, image list and logs are always visible.
+          </p>
+          <div className="space-y-2">
+            {(
+              [
+                ["actions", "Actions (AI, sort, download, export)"],
+                ["quality", "Quality & PDF size"],
+                ["keys", "OpenRouter API keys"],
+                ["models", "Model selector"],
+                ["years", "Manual tag year range"],
+                ["report-opts", "Report options"],
+              ] as [SectionKey, string][]
+            ).map(([k, label]) => (
+              <label key={k} className="flex items-center gap-2 rounded border bg-muted/20 px-3 py-2 text-sm">
+                <Checkbox
+                  checked={settings.visibleSections[k]}
+                  onCheckedChange={(c) =>
+                    setSettings((s) => ({
+                      ...s,
+                      visibleSections: { ...s.visibleSections, [k]: c === true },
+                    }))
+                  }
+                />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
