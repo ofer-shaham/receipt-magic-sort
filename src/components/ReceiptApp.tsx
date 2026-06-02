@@ -1289,7 +1289,9 @@ export function ReceiptApp() {
                   </div>
                 </AccordionContent>
               </AccordionItem>
+              )}
 
+              {settings.visibleSections["report-opts"] && (
               <AccordionItem value="report-opts">
                 <AccordionTrigger className="py-2">Report options</AccordionTrigger>
                 <AccordionContent>
@@ -1307,6 +1309,7 @@ export function ReceiptApp() {
                   </div>
                 </AccordionContent>
               </AccordionItem>
+              )}
             </Accordion>
           </Card>
 
