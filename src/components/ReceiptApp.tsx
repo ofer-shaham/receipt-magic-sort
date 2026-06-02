@@ -1128,7 +1128,9 @@ export function ReceiptApp() {
                   </div>
                 </AccordionContent>
               </AccordionItem>
+              )}
 
+              {settings.visibleSections.keys && (
               <AccordionItem value="keys">
                 <AccordionTrigger className="py-2">
                   <span className="flex items-center gap-2">
