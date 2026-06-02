@@ -73,6 +73,7 @@ type Receipt = {
   originalSize: number;
   file: File;
   qualityOverride: number | null;
+  excluded?: boolean;
   compressed?: {
     quality: number;
     blob: Blob;
