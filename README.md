@@ -57,10 +57,22 @@ A client-side web app that compresses, sorts, dates and exports receipt photos t
 - Custom PDF layouts: cover page, table of contents, per-month section breaks.
 - Mobile capture mode (camera-first UI, deskew + edge-crop).
 - IndexedDB caching of compressed blobs for faster reopen of large batches.
-- i18n: localized month names, RTL layout, Hebrew/Arabic date parsing.
-- Configurable date-format preference (DD/MM/YY, MM/DD/YY, YYYY-MM-DD) feeding the AI prompt.
-- Self-hosted OCR fallback (Tesseract.js WASM) for offline operation.
+- * i18n: localized month names, RTL layout, Hebrew/Arabic date parsing.
+- * Configurable date-format preference (DD/MM/YY, MM/DD/YY, YYYY-MM-DD) feeding the AI prompt.
+- * Self-hosted OCR fallback (Tesseract.js WASM) for offline operation.
 - Keyboard shortcuts for the wizard (←/→ navigate, ⌫ clear, ↵ next).
+
+---
+
+## Next TODOs
+
+1. wizard: to approve the date for an image - update the date control or press on approved button (after approving - the date tag will be green)
+3. AI image report:   1. image blur level (percentage) 2. date analyzed confidence level 3. the extracted date as text (only the date, without the hour)
+4. image list: by default order by date. but support order by blur level (it should not effect the pdf's order of images). also allow showing only the images which not yet approved. 
+5. wizard configuration: allow the user to decide the order of upcoming images.   by order of X (options: 1. show images without date analyzation first/last 2. date analyzed confidence level 3. image blur level)
+6. image list: when clicking on an item which wasn't approved yet - open the approve wizard  for that image.
+7. add a new wizard for generating images from 1 file. it will allow to split an image of few receipts to few individual images. the user will be able to use a crop and rotate operations and then export to a file archive which includes multiple files. the user will be able then to import that archive and see those images based on the original name of the parent image with a suffix: _splitted_id (where id is the index).  
+8. wizard: show the final result as DD/MM/YYYY format
 
 ---
 
