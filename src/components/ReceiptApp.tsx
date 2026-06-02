@@ -127,6 +127,14 @@ function saveDateCache(c: Record<string, CachedDate>) {
   localStorage.setItem(DATE_CACHE_KEY, JSON.stringify(c));
 }
 
+type SectionKey =
+  | "actions"
+  | "quality"
+  | "keys"
+  | "models"
+  | "years"
+  | "report-opts";
+
 type Settings = {
   minKeyIntervalSec: number;
   maxPdfSizeMB: number;
@@ -139,6 +147,7 @@ type Settings = {
   cooldownSec: number;
   autoSaveEnabled: boolean;
   autoSaveIntervalSec: number;
+  visibleSections: Record<SectionKey, boolean>;
 };
 const DEFAULT_SETTINGS: Settings = {
   minKeyIntervalSec: 0,
@@ -152,6 +161,14 @@ const DEFAULT_SETTINGS: Settings = {
   cooldownSec: 65,
   autoSaveEnabled: false,
   autoSaveIntervalSec: 60,
+  visibleSections: {
+    actions: true,
+    quality: true,
+    keys: true,
+    models: true,
+    years: true,
+    "report-opts": true,
+  },
 };
 
 function loadSettings(): Settings {
