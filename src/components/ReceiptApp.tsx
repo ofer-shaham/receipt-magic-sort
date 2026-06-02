@@ -1043,7 +1043,9 @@ export function ReceiptApp() {
                   </div>
                 </AccordionContent>
               </AccordionItem>
+              )}
 
+              {settings.visibleSections.quality && (
               <AccordionItem value="quality">
                 <AccordionTrigger className="py-2">
                   Quality & PDF size
