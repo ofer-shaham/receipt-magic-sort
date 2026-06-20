@@ -2176,9 +2176,16 @@ function WizardStep({
           </div>
           <p className="font-mono text-[11px] text-muted-foreground">{iso || "—"}</p>
         </div>
-        {receipt.date && (
-          <Button size="sm" variant="ghost" onClick={onClear}>Clear date</Button>
-        )}
+        <div className="flex flex-wrap gap-2 border-t pt-2">
+          {receipt.date && !receipt.approved && (
+            <Button size="sm" onClick={onApprove}>
+              <Check className="mr-1 h-3 w-3" /> Approve
+            </Button>
+          )}
+          {receipt.date && (
+            <Button size="sm" variant="ghost" onClick={onClear}>Clear date</Button>
+          )}
+        </div>
       </div>
     </div>
   );
