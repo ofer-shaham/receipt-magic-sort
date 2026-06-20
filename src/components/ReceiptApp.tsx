@@ -548,28 +548,61 @@ export function ReceiptApp() {
   };
 
   const setReceiptDate = useCallback(
-    (id: string, iso: string | null, raw: string | null, source: DateSource) => {
+    (
+      id: string,
+      iso: string | null,
+      raw: string | null,
+      source: DateSource,
+      opts: { approved?: boolean } = {},
+    ) => {
+      const approved = opts.approved ?? (source === "manual");
+      let updated: Receipt | undefined;
       setReceipts((prev) =>
-        prev.map((x) =>
-          x.id === id
-            ? {
-                ...x,
-                date: iso ?? undefined,
-                dateRaw: raw ?? undefined,
-                dateSource: source,
-                aiState: "done",
-              }
-            : x,
-        ),
+        prev.map((x) => {
+          if (x.id !== id) return x;
+          updated = {
+            ...x,
+            date: iso ?? undefined,
+            dateRaw: raw ?? undefined,
+            dateSource: source,
+            approved,
+            aiState: "done",
+          };
+          return updated;
+        }),
       );
       const r = receipts.find((x) => x.id === id);
       if (r) {
-        dateCache.current[r.cacheKey] = { iso, raw, source };
+        dateCache.current[r.cacheKey] = {
+          iso,
+          raw,
+          source,
+          aiDates: updated?.aiDates,
+          approved,
+        };
         saveDateCache(dateCache.current);
       }
     },
     [receipts],
   );
+
+  const approveReceipt = useCallback((id: string) => {
+    setReceipts((prev) =>
+      prev.map((x) => {
+        if (x.id !== id) return x;
+        const next = { ...x, approved: true };
+        dateCache.current[x.cacheKey] = {
+          iso: x.date ?? null,
+          raw: x.dateRaw ?? null,
+          source: x.dateSource,
+          aiDates: x.aiDates,
+          approved: true,
+        };
+        saveDateCache(dateCache.current);
+        return next;
+      }),
+    );
+  }, []);
 
   const refreshCredits = useCallback(
     async (silent = false) => {
