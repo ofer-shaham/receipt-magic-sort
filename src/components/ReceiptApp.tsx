@@ -162,6 +162,9 @@ type Settings = {
   cooldownSec: number;
   autoSaveEnabled: boolean;
   autoSaveIntervalSec: number;
+  // When AI detects multiple receipt dates on a single image, auto-split the
+  // image into N horizontal slices and treat each slice as its own receipt.
+  splitMultiReceipt: boolean;
   visibleSections: Record<SectionKey, boolean>;
 };
 const DEFAULT_SETTINGS: Settings = {
@@ -176,6 +179,7 @@ const DEFAULT_SETTINGS: Settings = {
   cooldownSec: 65,
   autoSaveEnabled: false,
   autoSaveIntervalSec: 60,
+  splitMultiReceipt: false,
   visibleSections: {
     actions: true,
     quality: true,
