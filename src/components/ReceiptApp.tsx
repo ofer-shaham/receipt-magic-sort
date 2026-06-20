@@ -89,6 +89,10 @@ type Receipt = {
   date?: string | null;
   dateRaw?: string | null;
   dateSource?: DateSource;
+  // All dates the AI detected on this image (>=1). Used for multi-receipt review.
+  aiDates?: AIDateEntry[];
+  // User has confirmed the displayed date is correct.
+  approved?: boolean;
   aiState: "idle" | "queued" | "loading" | "done" | "error";
 };
 
@@ -110,7 +114,13 @@ const SETTINGS_STORAGE = "receipt-settings-v1";
 const YEAR_START_STORAGE = "receipt-year-start";
 const YEAR_END_STORAGE = "receipt-year-end";
 
-type CachedDate = { iso: string | null; raw: string | null; source?: DateSource };
+type CachedDate = {
+  iso: string | null;
+  raw: string | null;
+  source?: DateSource;
+  aiDates?: AIDateEntry[];
+  approved?: boolean;
+};
 
 const MONTHS = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
