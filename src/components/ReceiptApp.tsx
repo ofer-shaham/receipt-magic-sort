@@ -709,10 +709,73 @@ export function ReceiptApp() {
           },
         );
         keyIndexRef.current = nextIndex;
+        const dates = result.dates ?? [];
+
+        // Multi-receipt image + split mode → replace this receipt with N slices,
+        // each pre-tagged with the corresponding detected date (unapproved).
+        if (dates.length > 1 && settings.splitMultiReceipt) {
+          try {
+            const parts = await splitImageVertically(r.file, dates.length);
+            const newReceipts: Receipt[] = [];
+            for (let i = 0; i < parts.length; i++) {
+              const f = parts[i];
+              const d = dates[i] ?? { iso: null, raw: null };
+              const ck = makeCacheKey(f);
+              newReceipts.push({
+                id: crypto.randomUUID(),
+                name: f.name,
+                cacheKey: ck,
+                originalSize: f.size,
+                file: f,
+                qualityOverride: null,
+                date: d.iso ?? undefined,
+                dateRaw: d.raw ?? undefined,
+                dateSource: "ai",
+                approved: false,
+                aiDates: [d],
+                aiState: "done",
+              });
+              dateCache.current[ck] = {
+                iso: d.iso,
+                raw: d.raw,
+                source: "ai",
+                aiDates: [d],
+                approved: false,
+              };
+            }
+            saveDateCache(dateCache.current);
+            setReceipts((prev) => {
+              const idx = prev.findIndex((x) => x.id === r.id);
+              if (idx < 0) return prev;
+              const next = [...prev];
+              next.splice(idx, 1, ...newReceipts);
+              return next;
+            });
+            pushLog({
+              level: "info",
+              source: `openrouter/key#${usedKeyIndex + 1}`,
+              message: `${r.name} → split into ${parts.length} (${dates.map((d) => d.raw ?? d.iso ?? "?").join(", ")})`,
+            });
+            toast.success(`${r.name}: split into ${parts.length} receipts`);
+            processed++;
+            setAiProgress((p) => ({ ...p, done: p.done + 1 }));
+            continue;
+          } catch (splitErr) {
+            pushLog({
+              level: "error",
+              source: "splitImage",
+              message: `${r.name}: ${(splitErr as Error).message}`,
+            });
+            // fall through to single-receipt handling below
+          }
+        }
+
         dateCache.current[r.cacheKey] = {
           iso: result.iso,
           raw: result.raw,
           source: "ai",
+          aiDates: dates,
+          approved: false,
         };
         saveDateCache(dateCache.current);
         setReceipts((prev) =>
@@ -723,6 +786,8 @@ export function ReceiptApp() {
                   date: result.iso ?? undefined,
                   dateRaw: result.raw ?? undefined,
                   dateSource: "ai",
+                  aiDates: dates,
+                  approved: false,
                   aiState: "done",
                 }
               : x,
@@ -732,8 +797,13 @@ export function ReceiptApp() {
         pushLog({
           level: "info",
           source: `openrouter/key#${usedKeyIndex + 1}`,
-          message: `${r.name} → ${result.raw ?? "NONE"} (${result.iso ?? "—"})`,
+          message: `${r.name} → ${result.raw ?? "NONE"} (${result.iso ?? "—"})${dates.length > 1 ? ` [+${dates.length - 1} more]` : ""}`,
         });
+        if (dates.length > 1) {
+          toast.warning(
+            `${r.name}: detected ${dates.length} receipts — review in wizard`,
+          );
+        }
       } catch (e) {
         const msg = (e as Error).message;
         pushLog({
