@@ -683,6 +683,8 @@ export function ReceiptApp() {
                   date: cached.iso ?? undefined,
                   dateRaw: cached.raw ?? undefined,
                   dateSource: cached.source,
+                  aiDates: cached.aiDates,
+                  approved: cached.approved,
                   aiState: "done",
                 }
               : x,
