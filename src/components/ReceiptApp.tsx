@@ -2044,11 +2044,17 @@ function WizardStep({
   years,
   onChange,
   onClear,
+  onApprove,
+  onPickDetected,
+  onSplit,
 }: {
   receipt: Receipt;
   years: number[];
   onChange: (iso: string | null, raw: string | null) => void;
   onClear: () => void;
+  onApprove: () => void;
+  onPickDetected: (d: AIDateEntry) => void;
+  onSplit: () => void;
 }) {
   const [iso, setIso] = useState<string>(receipt.date ?? "");
   const [raw, setRaw] = useState<string>(receipt.dateRaw ?? "");
