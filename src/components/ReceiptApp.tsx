@@ -1317,6 +1317,18 @@ export function ReceiptApp() {
                       />
                     )}
                   </div>
+                  <div className="flex items-center gap-2 border-t pt-2">
+                    <Checkbox
+                      id="splitmulti"
+                      checked={settings.splitMultiReceipt}
+                      onCheckedChange={(c) =>
+                        setSettings((s) => ({ ...s, splitMultiReceipt: c === true }))
+                      }
+                    />
+                    <Label htmlFor="splitmulti" className="text-sm">
+                      When AI detects multiple receipts on one image, auto-split into separate images
+                    </Label>
+                  </div>
                 </AccordionContent>
               </AccordionItem>
               )}
