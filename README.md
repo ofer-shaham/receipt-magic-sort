@@ -64,7 +64,14 @@ A client-side web app that compresses, sorts, dates and exports receipt photos t
 
 ---
 
-## Next TODOs
+## Next TODO:
+the following option is not reliable and should be addressed: "When AI detects multiple receipts on one image, auto-split into separate images".
+
+allow the user to rotate/crop an image and therefor create one or more images based on original file. there are cases where multiple receipts are contained within 1 image and therefor intermediate work is required.
+
+allow to do it manually first.
+
+## All todos:
 1. add a tab which expose full logs (server, client, 3rd parties (i.e: AI))
 2. add tab which monitor AI work and token balance
 3. add a flow named "cropping" which allows the user extract image from another. and keep recording of the new images which created by cropping and allow to export the new images to files based on the original filename and also add a suffix:  .child.[index]
