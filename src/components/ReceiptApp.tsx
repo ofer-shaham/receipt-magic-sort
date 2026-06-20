@@ -1598,6 +1598,14 @@ export function ReceiptApp() {
                               {r.dateRaw || r.date}
                             </span>
                           )}
+                          {r.date && r.dateSource === "ai" && !r.approved && (
+                            <span
+                              className="ml-1 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] text-amber-600"
+                              title="AI detection — open wizard to review/approve"
+                            >
+                              {r.aiDates && r.aiDates.length > 1 ? `?×${r.aiDates.length}` : "?"}
+                            </span>
+                          )}
                           {r.aiState === "queued" && (
                             <span className="ml-2 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px]">queued</span>
                           )}
