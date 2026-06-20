@@ -2102,7 +2102,39 @@ function WizardStep({
             <span className={receipt.dateSource === "ai" ? "text-primary" : "text-emerald-600"}>
               {receipt.dateSource === "ai" ? "AI extracted" : "Manual"}
             </span>
+            {receipt.dateSource === "ai" && (
+              receipt.approved ? (
+                <span className="ml-2 rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[10px] text-emerald-600">approved</span>
+              ) : (
+                <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] text-amber-600">needs approval</span>
+              )
+            )}
           </p>
+        )}
+        {receipt.aiDates && receipt.aiDates.length > 1 && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
+            <p className="mb-2 text-xs font-semibold text-amber-700 dark:text-amber-400">
+              ⚠ AI detected {receipt.aiDates.length} receipts on this image
+            </p>
+            <div className="mb-2 flex flex-wrap gap-1">
+              {receipt.aiDates.map((d, i) => {
+                const active = (d.iso && d.iso === receipt.date) || (!d.iso && d.raw === receipt.dateRaw);
+                return (
+                  <button
+                    key={i}
+                    onClick={() => onPickDetected(d)}
+                    className={`rounded px-2 py-1 font-mono text-[11px] ${active ? "bg-primary text-primary-foreground" : "bg-card hover:bg-accent border"}`}
+                    title="Use this date"
+                  >
+                    {d.raw || d.iso || "?"}
+                  </button>
+                );
+              })}
+            </div>
+            <Button size="sm" variant="outline" onClick={onSplit}>
+              Split image into {receipt.aiDates.length} receipts
+            </Button>
+          </div>
         )}
         <div className="space-y-1">
           <Label className="text-xs">Date as printed on receipt</Label>
