@@ -10,7 +10,9 @@ import {
   formatBytes,
   FREE_VISION_MODELS,
   safeSlug,
+  splitImageVertically,
   timestamp,
+  type AIDateEntry,
   type KeyStatus,
   type OpenRouterCredits,
   type PdfItem,
@@ -87,6 +89,10 @@ type Receipt = {
   date?: string | null;
   dateRaw?: string | null;
   dateSource?: DateSource;
+  // All dates the AI detected on this image (>=1). Used for multi-receipt review.
+  aiDates?: AIDateEntry[];
+  // User has confirmed the displayed date is correct.
+  approved?: boolean;
   aiState: "idle" | "queued" | "loading" | "done" | "error";
 };
 
@@ -108,7 +114,13 @@ const SETTINGS_STORAGE = "receipt-settings-v1";
 const YEAR_START_STORAGE = "receipt-year-start";
 const YEAR_END_STORAGE = "receipt-year-end";
 
-type CachedDate = { iso: string | null; raw: string | null; source?: DateSource };
+type CachedDate = {
+  iso: string | null;
+  raw: string | null;
+  source?: DateSource;
+  aiDates?: AIDateEntry[];
+  approved?: boolean;
+};
 
 const MONTHS = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -150,6 +162,9 @@ type Settings = {
   cooldownSec: number;
   autoSaveEnabled: boolean;
   autoSaveIntervalSec: number;
+  // When AI detects multiple receipt dates on a single image, auto-split the
+  // image into N horizontal slices and treat each slice as its own receipt.
+  splitMultiReceipt: boolean;
   visibleSections: Record<SectionKey, boolean>;
 };
 const DEFAULT_SETTINGS: Settings = {
@@ -164,6 +179,7 @@ const DEFAULT_SETTINGS: Settings = {
   cooldownSec: 65,
   autoSaveEnabled: false,
   autoSaveIntervalSec: 60,
+  splitMultiReceipt: false,
   visibleSections: {
     actions: true,
     quality: true,
@@ -465,6 +481,8 @@ export function ReceiptApp() {
         date: cached?.iso ?? undefined,
         dateRaw: cached?.raw ?? undefined,
         dateSource: cached?.source,
+        aiDates: cached?.aiDates,
+        approved: cached?.approved,
         aiState: "idle",
       };
     });
@@ -530,28 +548,61 @@ export function ReceiptApp() {
   };
 
   const setReceiptDate = useCallback(
-    (id: string, iso: string | null, raw: string | null, source: DateSource) => {
+    (
+      id: string,
+      iso: string | null,
+      raw: string | null,
+      source: DateSource,
+      opts: { approved?: boolean } = {},
+    ) => {
+      const approved = opts.approved ?? (source === "manual");
+      let updated: Receipt | undefined;
       setReceipts((prev) =>
-        prev.map((x) =>
-          x.id === id
-            ? {
-                ...x,
-                date: iso ?? undefined,
-                dateRaw: raw ?? undefined,
-                dateSource: source,
-                aiState: "done",
-              }
-            : x,
-        ),
+        prev.map((x) => {
+          if (x.id !== id) return x;
+          updated = {
+            ...x,
+            date: iso ?? undefined,
+            dateRaw: raw ?? undefined,
+            dateSource: source,
+            approved,
+            aiState: "done",
+          };
+          return updated;
+        }),
       );
       const r = receipts.find((x) => x.id === id);
       if (r) {
-        dateCache.current[r.cacheKey] = { iso, raw, source };
+        dateCache.current[r.cacheKey] = {
+          iso,
+          raw,
+          source,
+          aiDates: updated?.aiDates,
+          approved,
+        };
         saveDateCache(dateCache.current);
       }
     },
     [receipts],
   );
+
+  const approveReceipt = useCallback((id: string) => {
+    setReceipts((prev) =>
+      prev.map((x) => {
+        if (x.id !== id) return x;
+        const next = { ...x, approved: true };
+        dateCache.current[x.cacheKey] = {
+          iso: x.date ?? null,
+          raw: x.dateRaw ?? null,
+          source: x.dateSource,
+          aiDates: x.aiDates,
+          approved: true,
+        };
+        saveDateCache(dateCache.current);
+        return next;
+      }),
+    );
+  }, []);
 
   const refreshCredits = useCallback(
     async (silent = false) => {
@@ -632,6 +683,8 @@ export function ReceiptApp() {
                   date: cached.iso ?? undefined,
                   dateRaw: cached.raw ?? undefined,
                   dateSource: cached.source,
+                  aiDates: cached.aiDates,
+                  approved: cached.approved,
                   aiState: "done",
                 }
               : x,
@@ -658,10 +711,73 @@ export function ReceiptApp() {
           },
         );
         keyIndexRef.current = nextIndex;
+        const dates = result.dates ?? [];
+
+        // Multi-receipt image + split mode → replace this receipt with N slices,
+        // each pre-tagged with the corresponding detected date (unapproved).
+        if (dates.length > 1 && settings.splitMultiReceipt) {
+          try {
+            const parts = await splitImageVertically(r.file, dates.length);
+            const newReceipts: Receipt[] = [];
+            for (let i = 0; i < parts.length; i++) {
+              const f = parts[i];
+              const d = dates[i] ?? { iso: null, raw: null };
+              const ck = makeCacheKey(f);
+              newReceipts.push({
+                id: crypto.randomUUID(),
+                name: f.name,
+                cacheKey: ck,
+                originalSize: f.size,
+                file: f,
+                qualityOverride: null,
+                date: d.iso ?? undefined,
+                dateRaw: d.raw ?? undefined,
+                dateSource: "ai",
+                approved: false,
+                aiDates: [d],
+                aiState: "done",
+              });
+              dateCache.current[ck] = {
+                iso: d.iso,
+                raw: d.raw,
+                source: "ai",
+                aiDates: [d],
+                approved: false,
+              };
+            }
+            saveDateCache(dateCache.current);
+            setReceipts((prev) => {
+              const idx = prev.findIndex((x) => x.id === r.id);
+              if (idx < 0) return prev;
+              const next = [...prev];
+              next.splice(idx, 1, ...newReceipts);
+              return next;
+            });
+            pushLog({
+              level: "info",
+              source: `openrouter/key#${usedKeyIndex + 1}`,
+              message: `${r.name} → split into ${parts.length} (${dates.map((d) => d.raw ?? d.iso ?? "?").join(", ")})`,
+            });
+            toast.success(`${r.name}: split into ${parts.length} receipts`);
+            processed++;
+            setAiProgress((p) => ({ ...p, done: p.done + 1 }));
+            continue;
+          } catch (splitErr) {
+            pushLog({
+              level: "error",
+              source: "splitImage",
+              message: `${r.name}: ${(splitErr as Error).message}`,
+            });
+            // fall through to single-receipt handling below
+          }
+        }
+
         dateCache.current[r.cacheKey] = {
           iso: result.iso,
           raw: result.raw,
           source: "ai",
+          aiDates: dates,
+          approved: false,
         };
         saveDateCache(dateCache.current);
         setReceipts((prev) =>
@@ -672,6 +788,8 @@ export function ReceiptApp() {
                   date: result.iso ?? undefined,
                   dateRaw: result.raw ?? undefined,
                   dateSource: "ai",
+                  aiDates: dates,
+                  approved: false,
                   aiState: "done",
                 }
               : x,
@@ -681,8 +799,13 @@ export function ReceiptApp() {
         pushLog({
           level: "info",
           source: `openrouter/key#${usedKeyIndex + 1}`,
-          message: `${r.name} → ${result.raw ?? "NONE"} (${result.iso ?? "—"})`,
+          message: `${r.name} → ${result.raw ?? "NONE"} (${result.iso ?? "—"})${dates.length > 1 ? ` [+${dates.length - 1} more]` : ""}`,
         });
+        if (dates.length > 1) {
+          toast.warning(
+            `${r.name}: detected ${dates.length} receipts — review in wizard`,
+          );
+        }
       } catch (e) {
         const msg = (e as Error).message;
         pushLog({
@@ -740,9 +863,15 @@ export function ReceiptApp() {
   const previewImage = receipts.find((r) => r.id === imagePreviewId);
 
   const buildWizardQueue = () => {
+    // Priority: untagged → AI-tagged-but-unapproved → approved/manual
     const untagged = receipts.filter((r) => !r.date).map((r) => r.id);
-    const tagged = sortedReceipts.filter((r) => r.date).map((r) => r.id);
-    return [...untagged, ...tagged];
+    const needsReview = sortedReceipts
+      .filter((r) => r.date && r.dateSource === "ai" && !r.approved)
+      .map((r) => r.id);
+    const rest = sortedReceipts
+      .filter((r) => r.date && !(r.dateSource === "ai" && !r.approved))
+      .map((r) => r.id);
+    return [...untagged, ...needsReview, ...rest];
   };
   const startWizard = (focusId?: string) => {
     const q = buildWizardQueue();
@@ -752,6 +881,65 @@ export function ReceiptApp() {
     setWizardOpen(true);
   };
   const wizardReceipt = receipts.find((r) => r.id === wizardQueue[wizardPos]);
+
+  // Split a receipt into N slices (user-driven from the wizard).
+  const splitReceiptIntoParts = async (id: string, dates: AIDateEntry[]) => {
+    const r = receipts.find((x) => x.id === id);
+    if (!r || dates.length < 2) return;
+    try {
+      const parts = await splitImageVertically(r.file, dates.length);
+      const newReceipts: Receipt[] = parts.map((f, i) => {
+        const d = dates[i] ?? { iso: null, raw: null };
+        const ck = makeCacheKey(f);
+        dateCache.current[ck] = {
+          iso: d.iso,
+          raw: d.raw,
+          source: "ai",
+          aiDates: [d],
+          approved: false,
+        };
+        return {
+          id: crypto.randomUUID(),
+          name: f.name,
+          cacheKey: ck,
+          originalSize: f.size,
+          file: f,
+          qualityOverride: null,
+          date: d.iso ?? undefined,
+          dateRaw: d.raw ?? undefined,
+          dateSource: "ai",
+          approved: false,
+          aiDates: [d],
+          aiState: "done",
+        };
+      });
+      saveDateCache(dateCache.current);
+      setReceipts((prev) => {
+        const idx = prev.findIndex((x) => x.id === id);
+        if (idx < 0) return prev;
+        const next = [...prev];
+        next.splice(idx, 1, ...newReceipts);
+        return next;
+      });
+      // Rebuild wizard queue and jump to first new slice
+      const newIds = newReceipts.map((nr) => nr.id);
+      setWizardQueue((q) => {
+        const pos = q.indexOf(id);
+        if (pos < 0) return [...q, ...newIds];
+        const next = [...q];
+        next.splice(pos, 1, ...newIds);
+        return next;
+      });
+      toast.success(`Split into ${parts.length} receipts`);
+    } catch (e) {
+      toast.error(`Split failed: ${(e as Error).message}`);
+      pushLog({
+        level: "error",
+        source: "splitImage",
+        message: (e as Error).message,
+      });
+    }
+  };
 
   // Key management
   const addKey = () => {
@@ -1129,6 +1317,18 @@ export function ReceiptApp() {
                       />
                     )}
                   </div>
+                  <div className="flex items-center gap-2 border-t pt-2">
+                    <Checkbox
+                      id="splitmulti"
+                      checked={settings.splitMultiReceipt}
+                      onCheckedChange={(c) =>
+                        setSettings((s) => ({ ...s, splitMultiReceipt: c === true }))
+                      }
+                    />
+                    <Label htmlFor="splitmulti" className="text-sm">
+                      When AI detects multiple receipts on one image, auto-split into separate images
+                    </Label>
+                  </div>
                 </AccordionContent>
               </AccordionItem>
               )}
@@ -1396,6 +1596,14 @@ export function ReceiptApp() {
                                 <Tag className="h-2.5 w-2.5" />
                               )}
                               {r.dateRaw || r.date}
+                            </span>
+                          )}
+                          {r.date && r.dateSource === "ai" && !r.approved && (
+                            <span
+                              className="ml-1 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] text-amber-600"
+                              title="AI detection — open wizard to review/approve"
+                            >
+                              {r.aiDates && r.aiDates.length > 1 ? `?×${r.aiDates.length}` : "?"}
                             </span>
                           )}
                           {r.aiState === "queued" && (
@@ -1699,14 +1907,28 @@ export function ReceiptApp() {
               receipt={wizardReceipt}
               years={years}
               onChange={(iso, raw) => {
-                setReceiptDate(wizardReceipt.id, iso, raw, "manual");
+                setReceiptDate(wizardReceipt.id, iso, raw, "manual", { approved: true });
                 toast.success(iso ? `Saved date: ${raw || iso}` : "Date cleared");
+              }}
+              onApprove={() => {
+                approveReceipt(wizardReceipt.id);
+                toast.success("Approved");
+                if (wizardPos < wizardQueue.length - 1) setWizardPos((i) => i + 1);
+              }}
+              onPickDetected={(d) => {
+                setReceiptDate(wizardReceipt.id, d.iso, d.raw, "ai", { approved: true });
+                toast.success(`Picked: ${d.raw || d.iso || "?"}`);
+              }}
+              onSplit={() => {
+                if (wizardReceipt.aiDates && wizardReceipt.aiDates.length > 1) {
+                  splitReceiptIntoParts(wizardReceipt.id, wizardReceipt.aiDates);
+                }
               }}
               onClear={() => {
                 setReceipts((prev) =>
                   prev.map((x) =>
                     x.id === wizardReceipt.id
-                      ? { ...x, date: undefined, dateRaw: undefined, dateSource: undefined, aiState: "idle" }
+                      ? { ...x, date: undefined, dateRaw: undefined, dateSource: undefined, approved: false, aiState: "idle" }
                       : x,
                   ),
                 );
@@ -1842,11 +2064,17 @@ function WizardStep({
   years,
   onChange,
   onClear,
+  onApprove,
+  onPickDetected,
+  onSplit,
 }: {
   receipt: Receipt;
   years: number[];
   onChange: (iso: string | null, raw: string | null) => void;
   onClear: () => void;
+  onApprove: () => void;
+  onPickDetected: (d: AIDateEntry) => void;
+  onSplit: () => void;
 }) {
   const [iso, setIso] = useState<string>(receipt.date ?? "");
   const [raw, setRaw] = useState<string>(receipt.dateRaw ?? "");
@@ -1894,7 +2122,39 @@ function WizardStep({
             <span className={receipt.dateSource === "ai" ? "text-primary" : "text-emerald-600"}>
               {receipt.dateSource === "ai" ? "AI extracted" : "Manual"}
             </span>
+            {receipt.dateSource === "ai" && (
+              receipt.approved ? (
+                <span className="ml-2 rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[10px] text-emerald-600">approved</span>
+              ) : (
+                <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] text-amber-600">needs approval</span>
+              )
+            )}
           </p>
+        )}
+        {receipt.aiDates && receipt.aiDates.length > 1 && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
+            <p className="mb-2 text-xs font-semibold text-amber-700 dark:text-amber-400">
+              ⚠ AI detected {receipt.aiDates.length} receipts on this image
+            </p>
+            <div className="mb-2 flex flex-wrap gap-1">
+              {receipt.aiDates.map((d, i) => {
+                const active = (d.iso && d.iso === receipt.date) || (!d.iso && d.raw === receipt.dateRaw);
+                return (
+                  <button
+                    key={i}
+                    onClick={() => onPickDetected(d)}
+                    className={`rounded px-2 py-1 font-mono text-[11px] ${active ? "bg-primary text-primary-foreground" : "bg-card hover:bg-accent border"}`}
+                    title="Use this date"
+                  >
+                    {d.raw || d.iso || "?"}
+                  </button>
+                );
+              })}
+            </div>
+            <Button size="sm" variant="outline" onClick={onSplit}>
+              Split image into {receipt.aiDates.length} receipts
+            </Button>
+          </div>
         )}
         <div className="space-y-1">
           <Label className="text-xs">Date as printed on receipt</Label>
@@ -1936,9 +2196,16 @@ function WizardStep({
           </div>
           <p className="font-mono text-[11px] text-muted-foreground">{iso || "—"}</p>
         </div>
-        {receipt.date && (
-          <Button size="sm" variant="ghost" onClick={onClear}>Clear date</Button>
-        )}
+        <div className="flex flex-wrap gap-2 border-t pt-2">
+          {receipt.date && !receipt.approved && (
+            <Button size="sm" onClick={onApprove}>
+              <Check className="mr-1 h-3 w-3" /> Approve
+            </Button>
+          )}
+          {receipt.date && (
+            <Button size="sm" variant="ghost" onClick={onClear}>Clear date</Button>
+          )}
+        </div>
       </div>
     </div>
   );

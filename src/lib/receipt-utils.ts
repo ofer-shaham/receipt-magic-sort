@@ -251,7 +251,12 @@ export async function fetchFreeVisionModelsList(): Promise<string[]> {
   return Array.from(new Set(slugs));
 }
 
-export type AIDateResult = { iso: string | null; raw: string | null };
+export type AIDateEntry = { iso: string | null; raw: string | null };
+export type AIDateResult = {
+  iso: string | null;
+  raw: string | null;
+  dates: AIDateEntry[];
+};
 
 export class RateLimitError extends Error {
   constructor(msg: string) {
@@ -266,16 +271,16 @@ export async function extractDateWithAI(
   model: string,
 ): Promise<AIDateResult> {
   const img = await loadImage(dataUrl);
-  const cropH = Math.round(img.height * 0.4);
+  // Use full image — multiple receipts may appear anywhere in the frame.
   const canvas = document.createElement("canvas");
   canvas.width = img.width;
-  canvas.height = cropH;
+  canvas.height = img.height;
   const ctx = canvas.getContext("2d")!;
   ctx.drawImage(img, 0, 0);
   const cropped = canvas.toDataURL("image/jpeg", 0.7);
 
   const prompt =
-    'Find the transaction/receipt date. The receipts use DD/MM/YY (or DD/MM/YYYY) — day first, month second. Reply with ONE LINE of JSON: {"raw":"DD/MM/YY","iso":"YYYY-MM-DD"}. Always format raw as DD/MM/YY using two-digit day, two-digit month, two-digit year. Do NOT swap day and month. If no date is visible, reply NONE.';
+    'You are reading one or more retail receipts in an image. Find the transaction date of EACH distinct receipt. Receipts use DD/MM/YY (or DD/MM/YYYY) — day first, month second; never swap day and month. Reply with ONE LINE of JSON: {"dates":[{"raw":"DD/MM/YY","iso":"YYYY-MM-DD"}, ...]}. Always format raw as DD/MM/YY (two-digit day, month, year). If the image contains multiple receipts, include one entry per receipt in reading order. If no date is visible, reply NONE.';
 
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -304,23 +309,73 @@ export async function extractDateWithAI(
     throw new Error(`OpenRouter: ${msg}`);
   }
   const txt: string = (json.choices?.[0]?.message?.content ?? "").trim();
-  if (/^NONE/i.test(txt)) return { iso: null, raw: null };
-  const jsonMatch = txt.match(/\{[^}]*\}/);
-  if (jsonMatch) {
+  if (/^NONE/i.test(txt)) return { iso: null, raw: null, dates: [] };
+
+  const normalize = (obj: any): AIDateEntry => {
+    const iso =
+      typeof obj?.iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(obj.iso)
+        ? obj.iso
+        : null;
+    const raw = typeof obj?.raw === "string" ? obj.raw : null;
+    return { iso, raw: raw ?? iso };
+  };
+
+  const objMatch = txt.match(/\{[\s\S]*\}/);
+  if (objMatch) {
     try {
-      const obj = JSON.parse(jsonMatch[0]);
-      const iso =
-        typeof obj.iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(obj.iso)
-          ? obj.iso
-          : null;
-      const raw = typeof obj.raw === "string" ? obj.raw : null;
-      return { iso, raw: raw ?? iso };
+      const obj = JSON.parse(objMatch[0]);
+      if (Array.isArray(obj?.dates) && obj.dates.length) {
+        const dates: AIDateEntry[] = obj.dates
+          .map(normalize)
+          .filter((d: AIDateEntry) => d.iso || d.raw);
+        if (dates.length)
+          return { iso: dates[0].iso, raw: dates[0].raw, dates };
+      }
+      if (obj?.iso || obj?.raw) {
+        const single = normalize(obj);
+        return { iso: single.iso, raw: single.raw, dates: [single] };
+      }
     } catch {
       /* ignore */
     }
   }
   const iso = txt.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? null;
-  return { iso, raw: iso };
+  return { iso, raw: iso, dates: iso ? [{ iso, raw: iso }] : [] };
+}
+
+// Split a single image into N horizontal slices (top-to-bottom) for the
+// "multi-receipt → split" workflow.
+export async function splitImageVertically(
+  file: File,
+  parts: number,
+): Promise<File[]> {
+  if (parts <= 1) return [file];
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await loadImage(url);
+    const out: File[] = [];
+    const sliceH = Math.floor(img.height / parts);
+    for (let i = 0; i < parts; i++) {
+      const h = i === parts - 1 ? img.height - sliceH * i : sliceH;
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d")!;
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, img.width, h);
+      ctx.drawImage(img, 0, -sliceH * i);
+      const blob: Blob = await new Promise((res) =>
+        canvas.toBlob((b) => res(b!), "image/jpeg", 0.92),
+      );
+      const base = file.name.replace(/\.[^.]+$/, "");
+      out.push(
+        new File([blob], `${base}_part${i + 1}.jpg`, { type: "image/jpeg" }),
+      );
+    }
+    return out;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 export type KeyStatus = {
