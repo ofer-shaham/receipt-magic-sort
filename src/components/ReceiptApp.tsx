@@ -1887,14 +1887,28 @@ export function ReceiptApp() {
               receipt={wizardReceipt}
               years={years}
               onChange={(iso, raw) => {
-                setReceiptDate(wizardReceipt.id, iso, raw, "manual");
+                setReceiptDate(wizardReceipt.id, iso, raw, "manual", { approved: true });
                 toast.success(iso ? `Saved date: ${raw || iso}` : "Date cleared");
+              }}
+              onApprove={() => {
+                approveReceipt(wizardReceipt.id);
+                toast.success("Approved");
+                if (wizardPos < wizardQueue.length - 1) setWizardPos((i) => i + 1);
+              }}
+              onPickDetected={(d) => {
+                setReceiptDate(wizardReceipt.id, d.iso, d.raw, "ai", { approved: true });
+                toast.success(`Picked: ${d.raw || d.iso || "?"}`);
+              }}
+              onSplit={() => {
+                if (wizardReceipt.aiDates && wizardReceipt.aiDates.length > 1) {
+                  splitReceiptIntoParts(wizardReceipt.id, wizardReceipt.aiDates);
+                }
               }}
               onClear={() => {
                 setReceipts((prev) =>
                   prev.map((x) =>
                     x.id === wizardReceipt.id
-                      ? { ...x, date: undefined, dateRaw: undefined, dateSource: undefined, aiState: "idle" }
+                      ? { ...x, date: undefined, dateRaw: undefined, dateSource: undefined, approved: false, aiState: "idle" }
                       : x,
                   ),
                 );
