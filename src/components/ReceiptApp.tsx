@@ -863,9 +863,15 @@ export function ReceiptApp() {
   const previewImage = receipts.find((r) => r.id === imagePreviewId);
 
   const buildWizardQueue = () => {
+    // Priority: untagged → AI-tagged-but-unapproved → approved/manual
     const untagged = receipts.filter((r) => !r.date).map((r) => r.id);
-    const tagged = sortedReceipts.filter((r) => r.date).map((r) => r.id);
-    return [...untagged, ...tagged];
+    const needsReview = sortedReceipts
+      .filter((r) => r.date && r.dateSource === "ai" && !r.approved)
+      .map((r) => r.id);
+    const rest = sortedReceipts
+      .filter((r) => r.date && !(r.dateSource === "ai" && !r.approved))
+      .map((r) => r.id);
+    return [...untagged, ...needsReview, ...rest];
   };
   const startWizard = (focusId?: string) => {
     const q = buildWizardQueue();
@@ -875,6 +881,65 @@ export function ReceiptApp() {
     setWizardOpen(true);
   };
   const wizardReceipt = receipts.find((r) => r.id === wizardQueue[wizardPos]);
+
+  // Split a receipt into N slices (user-driven from the wizard).
+  const splitReceiptIntoParts = async (id: string, dates: AIDateEntry[]) => {
+    const r = receipts.find((x) => x.id === id);
+    if (!r || dates.length < 2) return;
+    try {
+      const parts = await splitImageVertically(r.file, dates.length);
+      const newReceipts: Receipt[] = parts.map((f, i) => {
+        const d = dates[i] ?? { iso: null, raw: null };
+        const ck = makeCacheKey(f);
+        dateCache.current[ck] = {
+          iso: d.iso,
+          raw: d.raw,
+          source: "ai",
+          aiDates: [d],
+          approved: false,
+        };
+        return {
+          id: crypto.randomUUID(),
+          name: f.name,
+          cacheKey: ck,
+          originalSize: f.size,
+          file: f,
+          qualityOverride: null,
+          date: d.iso ?? undefined,
+          dateRaw: d.raw ?? undefined,
+          dateSource: "ai",
+          approved: false,
+          aiDates: [d],
+          aiState: "done",
+        };
+      });
+      saveDateCache(dateCache.current);
+      setReceipts((prev) => {
+        const idx = prev.findIndex((x) => x.id === id);
+        if (idx < 0) return prev;
+        const next = [...prev];
+        next.splice(idx, 1, ...newReceipts);
+        return next;
+      });
+      // Rebuild wizard queue and jump to first new slice
+      const newIds = newReceipts.map((nr) => nr.id);
+      setWizardQueue((q) => {
+        const pos = q.indexOf(id);
+        if (pos < 0) return [...q, ...newIds];
+        const next = [...q];
+        next.splice(pos, 1, ...newIds);
+        return next;
+      });
+      toast.success(`Split into ${parts.length} receipts`);
+    } catch (e) {
+      toast.error(`Split failed: ${(e as Error).message}`);
+      pushLog({
+        level: "error",
+        source: "splitImage",
+        message: (e as Error).message,
+      });
+    }
+  };
 
   // Key management
   const addKey = () => {
