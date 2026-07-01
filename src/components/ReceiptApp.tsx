@@ -251,6 +251,9 @@ export function ReceiptApp() {
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
   const [yearStart, setYearStart] = useState(new Date().getFullYear() - 4);
   const [yearEnd, setYearEnd] = useState(new Date().getFullYear());
+  const [cropWizardOpen, setCropWizardOpen] = useState(false);
+  const [cropWizardId, setCropWizardId] = useState<string | null>(null);
+  const [pdfsStale, setPdfsStale] = useState(false);
 
   const dateCache = useRef<Record<string, CachedDate>>(loadDateCache());
   const keyIndexRef = useRef(0);
