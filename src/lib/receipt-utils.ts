@@ -251,7 +251,13 @@ export async function fetchFreeVisionModelsList(): Promise<string[]> {
   return Array.from(new Set(slugs));
 }
 
-export type AIDateEntry = { iso: string | null; raw: string | null };
+// Normalized bounding box (0..1) around a receipt in the original image.
+export type BBox = { x: number; y: number; w: number; h: number };
+export type AIDateEntry = {
+  iso: string | null;
+  raw: string | null;
+  bbox?: BBox | null;
+};
 export type AIDateResult = {
   iso: string | null;
   raw: string | null;
