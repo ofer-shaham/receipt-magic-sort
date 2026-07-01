@@ -406,65 +406,86 @@ export function ReceiptApp() {
     return [...withD, ...without];
   }, [receipts, sortDir]);
 
-  // Rebuild PDFs whenever sorted order, quality, or pdf options change
+  // Manual PDF build — user-triggered. Auto-clear PDFs when no receipts.
   useEffect(() => {
-    let cancelled = false;
-    const ready = sortedReceipts.length > 0 && sortedReceipts.every((r) => r.compressed);
+    if (sortedReceipts.length === 0) {
+      setPdfs((prev) => {
+        prev.forEach((p) => URL.revokeObjectURL(p.url));
+        return [];
+      });
+      setPdfsStale(false);
+    }
+  }, [sortedReceipts.length]);
+
+  // Mark PDFs stale whenever anything that would affect output changes.
+  useEffect(() => {
+    if (sortedReceipts.length > 0) setPdfsStale(true);
+  }, [
+    sortedReceipts,
+    settings.maxPdfSizeMB,
+    settings.showDateLabel,
+    settings.gridPdf,
+    settings.gridCols,
+  ]);
+
+  const buildAllPdfs = useCallback(async () => {
+    const ready =
+      sortedReceipts.length > 0 && sortedReceipts.every((r) => r.compressed);
     if (!ready) {
-      if (sortedReceipts.length === 0) {
-        setPdfs((prev) => {
-          prev.forEach((p) => URL.revokeObjectURL(p.url));
-          return [];
-        });
-      }
+      toast.error("Receipts still compressing — try again in a moment.");
       return;
     }
     setBuilding(true);
-    (async () => {
-      try {
-        const limit = Math.max(1, settings.maxPdfSizeMB) * 1024 * 1024;
-        const items: PdfItem[] = sortedReceipts
-          .filter((r) => !r.excluded)
-          .map((r) => ({
-            ...r.compressed!,
-            label: r.dateRaw || r.date || "",
-          }));
-        const out = await buildPdfsWithLimit(items, limit, {
-          showLabel: settings.showDateLabel,
-          grid: settings.gridPdf,
-          gridCols: settings.gridCols,
-        });
-        if (cancelled) return;
-        const next = out.map((p) => {
-          const ab = p.bytes.buffer.slice(
-            p.bytes.byteOffset,
-            p.bytes.byteOffset + p.bytes.byteLength,
-          ) as ArrayBuffer;
-          const blob = new Blob([ab], { type: "application/pdf" });
-          return {
-            url: URL.createObjectURL(blob),
-            size: blob.size,
-            pageCount: p.pageCount,
-          };
-        });
-        setPdfs((prev) => {
-          prev.forEach((p) => URL.revokeObjectURL(p.url));
-          return next;
-        });
-      } catch (e) {
-        pushLog({
-          level: "error",
-          source: "buildPdf",
-          message: (e as Error).message,
-          stack: (e as Error).stack,
-        });
-      } finally {
-        if (!cancelled) setBuilding(false);
+    try {
+      const limit = Math.max(1, settings.maxPdfSizeMB) * 1024 * 1024;
+      const items: PdfItem[] = sortedReceipts
+        .filter((r) => !r.excluded)
+        .map((r) => ({
+          ...r.compressed!,
+          label: r.dateRaw || r.date || "",
+        }));
+      if (!items.length) {
+        toast.error("Nothing to include — every image is excluded.");
+        return;
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
+      const out = await buildPdfsWithLimit(items, limit, {
+        showLabel: settings.showDateLabel,
+        grid: settings.gridPdf,
+        gridCols: settings.gridCols,
+      });
+      const next = out.map((p) => {
+        const ab = p.bytes.buffer.slice(
+          p.bytes.byteOffset,
+          p.bytes.byteOffset + p.bytes.byteLength,
+        ) as ArrayBuffer;
+        const blob = new Blob([ab], { type: "application/pdf" });
+        return {
+          url: URL.createObjectURL(blob),
+          size: blob.size,
+          pageCount: p.pageCount,
+        };
+      });
+      setPdfs((prev) => {
+        prev.forEach((p) => URL.revokeObjectURL(p.url));
+        return next;
+      });
+      setPdfsStale(false);
+      toast.success(
+        `Built ${next.length} PDF${next.length === 1 ? "" : "s"} (${formatBytes(
+          next.reduce((s, p) => s + p.size, 0),
+        )})`,
+      );
+    } catch (e) {
+      pushLog({
+        level: "error",
+        source: "buildPdf",
+        message: (e as Error).message,
+        stack: (e as Error).stack,
+      });
+      toast.error(`Build failed: ${(e as Error).message}`);
+    } finally {
+      setBuilding(false);
+    }
   }, [
     sortedReceipts,
     settings.maxPdfSizeMB,
