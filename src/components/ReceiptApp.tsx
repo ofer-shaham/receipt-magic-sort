@@ -2097,6 +2097,8 @@ function WizardStep({
   onApprove,
   onPickDetected,
   onSplit,
+  onAddDate,
+  onRemoveDate,
 }: {
   receipt: Receipt;
   years: number[];
@@ -2105,6 +2107,8 @@ function WizardStep({
   onApprove: () => void;
   onPickDetected: (d: AIDateEntry) => void;
   onSplit: () => void;
+  onAddDate: (d: AIDateEntry) => void;
+  onRemoveDate: (idx: number) => void;
 }) {
   const [iso, setIso] = useState<string>(receipt.date ?? "");
   const [raw, setRaw] = useState<string>(receipt.dateRaw ?? "");
