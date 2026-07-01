@@ -323,7 +323,15 @@ export async function extractDateWithAI(
         ? obj.iso
         : null;
     const raw = typeof obj?.raw === "string" ? obj.raw : null;
-    return { iso, raw: raw ?? iso };
+    let bbox: BBox | null = null;
+    const b = obj?.bbox;
+    if (b && typeof b === "object") {
+      const nx = Number(b.x), ny = Number(b.y), nw = Number(b.w), nh = Number(b.h);
+      if ([nx, ny, nw, nh].every((v) => Number.isFinite(v) && v >= 0 && v <= 1)) {
+        bbox = { x: nx, y: ny, w: Math.min(nw, 1 - nx), h: Math.min(nh, 1 - ny) };
+      }
+    }
+    return { iso, raw: raw ?? iso, bbox };
   };
 
   const objMatch = txt.match(/\{[\s\S]*\}/);
