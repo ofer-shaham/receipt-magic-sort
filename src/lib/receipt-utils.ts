@@ -286,7 +286,7 @@ export async function extractDateWithAI(
   const cropped = canvas.toDataURL("image/jpeg", 0.7);
 
   const prompt =
-    'You are reading one or more retail receipts in an image. Find the transaction date of EACH distinct receipt. Receipts use DD/MM/YY (or DD/MM/YYYY) — day first, month second; never swap day and month. Reply with ONE LINE of JSON: {"dates":[{"raw":"DD/MM/YY","iso":"YYYY-MM-DD"}, ...]}. Always format raw as DD/MM/YY (two-digit day, month, year). If the image contains multiple receipts, include one entry per receipt in reading order. If no date is visible, reply NONE.';
+    'You are reading one or more retail receipts in an image. For EACH distinct receipt, return its transaction date and a normalized bounding box that tightly frames that receipt. Receipts use DD/MM/YY (or DD/MM/YYYY) — day first, month second; never swap. Reply with ONE LINE of JSON: {"dates":[{"raw":"DD/MM/YY","iso":"YYYY-MM-DD","bbox":{"x":0.05,"y":0.10,"w":0.90,"h":0.40}}, ...]}. bbox coordinates are fractions 0..1 of the FULL image (x,y = top-left corner, w,h = width/height). raw MUST be DD/MM/YY (two-digit day, month, year). If the image contains multiple receipts, include one entry per receipt in reading order. If no date is visible, reply NONE.';
 
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
