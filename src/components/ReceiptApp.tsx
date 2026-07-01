@@ -1944,6 +1944,16 @@ export function ReceiptApp() {
                   splitReceiptIntoParts(wizardReceipt.id, wizardReceipt.aiDates);
                 }
               }}
+              onAddDate={(d) => {
+                const cur = wizardReceipt.aiDates ?? [];
+                updateAiDates(wizardReceipt.id, [...cur, d]);
+                toast.success(`Added detection: ${d.raw || d.iso}`);
+              }}
+              onRemoveDate={(idx) => {
+                const cur = wizardReceipt.aiDates ?? [];
+                const next = cur.filter((_, i) => i !== idx);
+                updateAiDates(wizardReceipt.id, next);
+              }}
               onClear={() => {
                 setReceipts((prev) =>
                   prev.map((x) =>
