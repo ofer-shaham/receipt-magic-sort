@@ -604,6 +604,26 @@ export function ReceiptApp() {
     );
   }, []);
 
+  const updateAiDates = useCallback(
+    (id: string, next: AIDateEntry[]) => {
+      setReceipts((prev) =>
+        prev.map((x) => {
+          if (x.id !== id) return x;
+          dateCache.current[x.cacheKey] = {
+            iso: x.date ?? null,
+            raw: x.dateRaw ?? null,
+            source: x.dateSource,
+            aiDates: next,
+            approved: x.approved ?? false,
+          };
+          saveDateCache(dateCache.current);
+          return { ...x, aiDates: next };
+        }),
+      );
+    },
+    [],
+  );
+
   const refreshCredits = useCallback(
     async (silent = false) => {
       const key = apiKeys[0];
