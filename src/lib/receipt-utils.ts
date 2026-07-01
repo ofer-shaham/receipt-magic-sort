@@ -392,6 +392,37 @@ export async function splitImageVertically(
   }
 }
 
+// Crop an arbitrary rectangular region (normalized 0..1) out of an image and
+// return a new File named "<originalBase>.part.<idx>.jpg".
+export async function cropImageRegion(
+  file: File,
+  bbox: BBox,
+  idx: number,
+): Promise<File> {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await loadImage(url);
+    const x = Math.max(0, Math.floor(bbox.x * img.width));
+    const y = Math.max(0, Math.floor(bbox.y * img.height));
+    const w = Math.max(1, Math.min(img.width - x, Math.floor(bbox.w * img.width)));
+    const h = Math.max(1, Math.min(img.height - y, Math.floor(bbox.h * img.height)));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d")!;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, x, y, w, h, 0, 0, w, h);
+    const blob: Blob = await new Promise((res) =>
+      canvas.toBlob((b) => res(b!), "image/jpeg", 0.92),
+    );
+    const base = file.name.replace(/\.[^.]+$/, "");
+    return new File([blob], `${base}.part.${idx}.jpg`, { type: "image/jpeg" });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 export type KeyStatus = {
   failures: number;
   cooldownUntil: number;
