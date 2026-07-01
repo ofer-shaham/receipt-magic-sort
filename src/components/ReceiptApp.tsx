@@ -1264,11 +1264,31 @@ export function ReceiptApp() {
                     >
                       <ArrowUpDown className="mr-1.5 h-4 w-4" /> {sortDir === "asc" ? "Asc" : "Desc"}
                     </Button>
-                    <Button onClick={downloadAllPdfs} disabled={!pdfs.length} size="sm" className="ml-auto">
+                    <Button
+                      onClick={buildAllPdfs}
+                      size="sm"
+                      variant={pdfsStale ? "default" : "outline"}
+                      disabled={!receipts.length || building}
+                      className="ml-auto"
+                      title="Generate PDF(s) with current settings"
+                    >
+                      {building ? (
+                        <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                      ) : (
+                        <FileText className="mr-1.5 h-4 w-4" />
+                      )}
+                      Build PDF{pdfsStale && pdfs.length ? " (stale)" : ""}
+                    </Button>
+                    <Button onClick={downloadAllPdfs} disabled={!pdfs.length} size="sm">
                       <Download className="mr-1.5 h-4 w-4" />
                       {pdfs.length > 1 ? `Download ${pdfs.length} PDFs` : "Download PDF"}
                     </Button>
                   </div>
+                  {pdfsStale && pdfs.length > 0 && (
+                    <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">
+                      Settings changed — rebuild to refresh PDF output.
+                    </p>
+                  )}
                   <div className="mt-3 flex flex-wrap gap-2 border-t pt-3">
                     <Button size="sm" variant="outline" onClick={() => setReportOpen(true)} disabled={!receipts.length}>
                       <FileDown className="mr-1 h-3 w-3" /> Date report
