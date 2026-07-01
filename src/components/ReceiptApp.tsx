@@ -1995,19 +1995,42 @@ export function ReceiptApp() {
         </div>
       </div>
 
-      {/* Large image preview */}
-      <Dialog open={!!previewImage} onOpenChange={(o) => !o && setImagePreviewId(null)}>
-        <DialogContent className="max-w-5xl">
-          <DialogHeader>
-            <DialogTitle className="font-mono text-sm">{previewImage?.name}</DialogTitle>
-          </DialogHeader>
-          {previewImage?.compressed && (
-            <div className="max-h-[80vh] overflow-auto">
-              <img src={previewImage.compressed.dataUrl} alt={previewImage.name} className="mx-auto block" />
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
+      {/* Large image preview (rotate + zoom loupe + open crop wizard) */}
+      <ImagePreviewDialog
+        open={!!previewImage}
+        onOpenChange={(o) => !o && setImagePreviewId(null)}
+        src={previewImage?.compressed?.dataUrl ?? null}
+        name={previewImage?.name ?? ""}
+        onOpenCropWizard={
+          previewImage
+            ? () => {
+                setCropWizardId(previewImage.id);
+                setCropWizardOpen(true);
+                setImagePreviewId(null);
+              }
+            : undefined
+        }
+      />
+
+      {/* Crop wizard — extract multiple receipts out of one image */}
+      <CropWizard
+        open={cropWizardOpen}
+        onOpenChange={(o) => {
+          setCropWizardOpen(o);
+          if (!o) setCropWizardId(null);
+        }}
+        imageSrc={cropTarget?.compressed?.dataUrl ?? null}
+        imageName={cropTarget?.name ?? ""}
+        aiBoxes={
+          cropTarget?.aiDates
+            ?.map((d) => d.bbox)
+            .filter((b): b is BBox => !!b) ?? []
+        }
+        onExtract={(boxes, removeOriginal) => {
+          if (cropWizardId) extractCroppedParts(cropWizardId, boxes, removeOriginal);
+        }}
+      />
+
 
       {/* Wizard */}
       <Dialog open={wizardOpen} onOpenChange={setWizardOpen}>
