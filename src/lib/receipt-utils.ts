@@ -251,7 +251,13 @@ export async function fetchFreeVisionModelsList(): Promise<string[]> {
   return Array.from(new Set(slugs));
 }
 
-export type AIDateEntry = { iso: string | null; raw: string | null };
+// Normalized bounding box (0..1) around a receipt in the original image.
+export type BBox = { x: number; y: number; w: number; h: number };
+export type AIDateEntry = {
+  iso: string | null;
+  raw: string | null;
+  bbox?: BBox | null;
+};
 export type AIDateResult = {
   iso: string | null;
   raw: string | null;
@@ -280,7 +286,7 @@ export async function extractDateWithAI(
   const cropped = canvas.toDataURL("image/jpeg", 0.7);
 
   const prompt =
-    'You are reading one or more retail receipts in an image. Find the transaction date of EACH distinct receipt. Receipts use DD/MM/YY (or DD/MM/YYYY) — day first, month second; never swap day and month. Reply with ONE LINE of JSON: {"dates":[{"raw":"DD/MM/YY","iso":"YYYY-MM-DD"}, ...]}. Always format raw as DD/MM/YY (two-digit day, month, year). If the image contains multiple receipts, include one entry per receipt in reading order. If no date is visible, reply NONE.';
+    'You are reading one or more retail receipts in an image. For EACH distinct receipt, return its transaction date and a normalized bounding box that tightly frames that receipt. Receipts use DD/MM/YY (or DD/MM/YYYY) — day first, month second; never swap. Reply with ONE LINE of JSON: {"dates":[{"raw":"DD/MM/YY","iso":"YYYY-MM-DD","bbox":{"x":0.05,"y":0.10,"w":0.90,"h":0.40}}, ...]}. bbox coordinates are fractions 0..1 of the FULL image (x,y = top-left corner, w,h = width/height). raw MUST be DD/MM/YY (two-digit day, month, year). If the image contains multiple receipts, include one entry per receipt in reading order. If no date is visible, reply NONE.';
 
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -317,7 +323,15 @@ export async function extractDateWithAI(
         ? obj.iso
         : null;
     const raw = typeof obj?.raw === "string" ? obj.raw : null;
-    return { iso, raw: raw ?? iso };
+    let bbox: BBox | null = null;
+    const b = obj?.bbox;
+    if (b && typeof b === "object") {
+      const nx = Number(b.x), ny = Number(b.y), nw = Number(b.w), nh = Number(b.h);
+      if ([nx, ny, nw, nh].every((v) => Number.isFinite(v) && v >= 0 && v <= 1)) {
+        bbox = { x: nx, y: ny, w: Math.min(nw, 1 - nx), h: Math.min(nh, 1 - ny) };
+      }
+    }
+    return { iso, raw: raw ?? iso, bbox };
   };
 
   const objMatch = txt.match(/\{[\s\S]*\}/);
@@ -373,6 +387,37 @@ export async function splitImageVertically(
       );
     }
     return out;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+// Crop an arbitrary rectangular region (normalized 0..1) out of an image and
+// return a new File named "<originalBase>.part.<idx>.jpg".
+export async function cropImageRegion(
+  file: File,
+  bbox: BBox,
+  idx: number,
+): Promise<File> {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await loadImage(url);
+    const x = Math.max(0, Math.floor(bbox.x * img.width));
+    const y = Math.max(0, Math.floor(bbox.y * img.height));
+    const w = Math.max(1, Math.min(img.width - x, Math.floor(bbox.w * img.width)));
+    const h = Math.max(1, Math.min(img.height - y, Math.floor(bbox.h * img.height)));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d")!;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, x, y, w, h, 0, 0, w, h);
+    const blob: Blob = await new Promise((res) =>
+      canvas.toBlob((b) => res(b!), "image/jpeg", 0.92),
+    );
+    const base = file.name.replace(/\.[^.]+$/, "");
+    return new File([blob], `${base}.part.${idx}.jpg`, { type: "image/jpeg" });
   } finally {
     URL.revokeObjectURL(url);
   }

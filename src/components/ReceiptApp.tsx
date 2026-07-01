@@ -3,6 +3,7 @@ import {
   buildPdfsWithLimit,
   buildRenamedArchive,
   compressImage,
+  cropImageRegion,
   extractDateRoundRobin,
   extractImagesFromArchive,
   fetchFreeVisionModelsList,
@@ -13,10 +14,13 @@ import {
   splitImageVertically,
   timestamp,
   type AIDateEntry,
+  type BBox,
   type KeyStatus,
   type OpenRouterCredits,
   type PdfItem,
 } from "@/lib/receipt-utils";
+import { CropWizard } from "@/components/CropWizard";
+import { ImagePreviewDialog } from "@/components/ImagePreviewDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -247,6 +251,9 @@ export function ReceiptApp() {
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
   const [yearStart, setYearStart] = useState(new Date().getFullYear() - 4);
   const [yearEnd, setYearEnd] = useState(new Date().getFullYear());
+  const [cropWizardOpen, setCropWizardOpen] = useState(false);
+  const [cropWizardId, setCropWizardId] = useState<string | null>(null);
+  const [pdfsStale, setPdfsStale] = useState(false);
 
   const dateCache = useRef<Record<string, CachedDate>>(loadDateCache());
   const keyIndexRef = useRef(0);
@@ -399,65 +406,86 @@ export function ReceiptApp() {
     return [...withD, ...without];
   }, [receipts, sortDir]);
 
-  // Rebuild PDFs whenever sorted order, quality, or pdf options change
+  // Manual PDF build — user-triggered. Auto-clear PDFs when no receipts.
   useEffect(() => {
-    let cancelled = false;
-    const ready = sortedReceipts.length > 0 && sortedReceipts.every((r) => r.compressed);
+    if (sortedReceipts.length === 0) {
+      setPdfs((prev) => {
+        prev.forEach((p) => URL.revokeObjectURL(p.url));
+        return [];
+      });
+      setPdfsStale(false);
+    }
+  }, [sortedReceipts.length]);
+
+  // Mark PDFs stale whenever anything that would affect output changes.
+  useEffect(() => {
+    if (sortedReceipts.length > 0) setPdfsStale(true);
+  }, [
+    sortedReceipts,
+    settings.maxPdfSizeMB,
+    settings.showDateLabel,
+    settings.gridPdf,
+    settings.gridCols,
+  ]);
+
+  const buildAllPdfs = useCallback(async () => {
+    const ready =
+      sortedReceipts.length > 0 && sortedReceipts.every((r) => r.compressed);
     if (!ready) {
-      if (sortedReceipts.length === 0) {
-        setPdfs((prev) => {
-          prev.forEach((p) => URL.revokeObjectURL(p.url));
-          return [];
-        });
-      }
+      toast.error("Receipts still compressing — try again in a moment.");
       return;
     }
     setBuilding(true);
-    (async () => {
-      try {
-        const limit = Math.max(1, settings.maxPdfSizeMB) * 1024 * 1024;
-        const items: PdfItem[] = sortedReceipts
-          .filter((r) => !r.excluded)
-          .map((r) => ({
-            ...r.compressed!,
-            label: r.dateRaw || r.date || "",
-          }));
-        const out = await buildPdfsWithLimit(items, limit, {
-          showLabel: settings.showDateLabel,
-          grid: settings.gridPdf,
-          gridCols: settings.gridCols,
-        });
-        if (cancelled) return;
-        const next = out.map((p) => {
-          const ab = p.bytes.buffer.slice(
-            p.bytes.byteOffset,
-            p.bytes.byteOffset + p.bytes.byteLength,
-          ) as ArrayBuffer;
-          const blob = new Blob([ab], { type: "application/pdf" });
-          return {
-            url: URL.createObjectURL(blob),
-            size: blob.size,
-            pageCount: p.pageCount,
-          };
-        });
-        setPdfs((prev) => {
-          prev.forEach((p) => URL.revokeObjectURL(p.url));
-          return next;
-        });
-      } catch (e) {
-        pushLog({
-          level: "error",
-          source: "buildPdf",
-          message: (e as Error).message,
-          stack: (e as Error).stack,
-        });
-      } finally {
-        if (!cancelled) setBuilding(false);
+    try {
+      const limit = Math.max(1, settings.maxPdfSizeMB) * 1024 * 1024;
+      const items: PdfItem[] = sortedReceipts
+        .filter((r) => !r.excluded)
+        .map((r) => ({
+          ...r.compressed!,
+          label: r.dateRaw || r.date || "",
+        }));
+      if (!items.length) {
+        toast.error("Nothing to include — every image is excluded.");
+        return;
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
+      const out = await buildPdfsWithLimit(items, limit, {
+        showLabel: settings.showDateLabel,
+        grid: settings.gridPdf,
+        gridCols: settings.gridCols,
+      });
+      const next = out.map((p) => {
+        const ab = p.bytes.buffer.slice(
+          p.bytes.byteOffset,
+          p.bytes.byteOffset + p.bytes.byteLength,
+        ) as ArrayBuffer;
+        const blob = new Blob([ab], { type: "application/pdf" });
+        return {
+          url: URL.createObjectURL(blob),
+          size: blob.size,
+          pageCount: p.pageCount,
+        };
+      });
+      setPdfs((prev) => {
+        prev.forEach((p) => URL.revokeObjectURL(p.url));
+        return next;
+      });
+      setPdfsStale(false);
+      toast.success(
+        `Built ${next.length} PDF${next.length === 1 ? "" : "s"} (${formatBytes(
+          next.reduce((s, p) => s + p.size, 0),
+        )})`,
+      );
+    } catch (e) {
+      pushLog({
+        level: "error",
+        source: "buildPdf",
+        message: (e as Error).message,
+        stack: (e as Error).stack,
+      });
+      toast.error(`Build failed: ${(e as Error).message}`);
+    } finally {
+      setBuilding(false);
+    }
   }, [
     sortedReceipts,
     settings.maxPdfSizeMB,
@@ -961,6 +989,56 @@ export function ReceiptApp() {
     }
   };
 
+  // Extract N cropped parts from an image using arbitrary user-drawn bboxes.
+  const extractCroppedParts = async (
+    id: string,
+    boxes: BBox[],
+    removeOriginal: boolean,
+  ) => {
+    const r = receipts.find((x) => x.id === id);
+    if (!r || !boxes.length) return;
+    try {
+      const files: File[] = [];
+      for (let i = 0; i < boxes.length; i++) {
+        files.push(await cropImageRegion(r.file, boxes[i], i + 1));
+      }
+      const newReceipts: Receipt[] = files.map((f) => {
+        const ck = makeCacheKey(f);
+        return {
+          id: crypto.randomUUID(),
+          name: f.name,
+          cacheKey: ck,
+          originalSize: f.size,
+          file: f,
+          qualityOverride: null,
+          aiState: "idle",
+        };
+      });
+      setReceipts((prev) => {
+        const idx = prev.findIndex((x) => x.id === id);
+        if (idx < 0) return [...prev, ...newReceipts];
+        const next = [...prev];
+        if (removeOriginal) next.splice(idx, 1, ...newReceipts);
+        else next.splice(idx + 1, 0, ...newReceipts);
+        return next;
+      });
+      toast.success(
+        `Extracted ${files.length} part${files.length === 1 ? "" : "s"}${
+          removeOriginal ? " (original removed)" : ""
+        }`,
+      );
+      setCropWizardOpen(false);
+    } catch (e) {
+      toast.error(`Crop failed: ${(e as Error).message}`);
+      pushLog({
+        level: "error",
+        source: "cropImage",
+        message: (e as Error).message,
+      });
+    }
+  };
+  const cropTarget = receipts.find((r) => r.id === cropWizardId);
+
   // Key management
   const addKey = () => {
     const k = newKey.trim();
@@ -1186,11 +1264,31 @@ export function ReceiptApp() {
                     >
                       <ArrowUpDown className="mr-1.5 h-4 w-4" /> {sortDir === "asc" ? "Asc" : "Desc"}
                     </Button>
-                    <Button onClick={downloadAllPdfs} disabled={!pdfs.length} size="sm" className="ml-auto">
+                    <Button
+                      onClick={buildAllPdfs}
+                      size="sm"
+                      variant={pdfsStale ? "default" : "outline"}
+                      disabled={!receipts.length || building}
+                      className="ml-auto"
+                      title="Generate PDF(s) with current settings"
+                    >
+                      {building ? (
+                        <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                      ) : (
+                        <FileText className="mr-1.5 h-4 w-4" />
+                      )}
+                      Build PDF{pdfsStale && pdfs.length ? " (stale)" : ""}
+                    </Button>
+                    <Button onClick={downloadAllPdfs} disabled={!pdfs.length} size="sm">
                       <Download className="mr-1.5 h-4 w-4" />
                       {pdfs.length > 1 ? `Download ${pdfs.length} PDFs` : "Download PDF"}
                     </Button>
                   </div>
+                  {pdfsStale && pdfs.length > 0 && (
+                    <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">
+                      Settings changed — rebuild to refresh PDF output.
+                    </p>
+                  )}
                   <div className="mt-3 flex flex-wrap gap-2 border-t pt-3">
                     <Button size="sm" variant="outline" onClick={() => setReportOpen(true)} disabled={!receipts.length}>
                       <FileDown className="mr-1 h-3 w-3" /> Date report
@@ -1858,6 +1956,17 @@ export function ReceiptApp() {
                           <Maximize2 className="h-3 w-3" />
                         </button>
                         <button
+                          className="rounded bg-primary/80 p-1 text-primary-foreground hover:bg-primary"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setCropWizardId(r.id);
+                            setCropWizardOpen(true);
+                          }}
+                          title="Crop multiple receipts out of this image"
+                        >
+                          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><line x1="20" y1="4" x2="8.12" y2="15.88" /><line x1="14.47" y1="14.48" x2="20" y2="20" /><line x1="8.12" y1="8.12" x2="12" y2="12" /></svg>
+                        </button>
+                        <button
                           className={`rounded p-1 text-white ${r.excluded ? "bg-emerald-600/80 hover:bg-emerald-600" : "bg-yellow-600/70 hover:bg-yellow-600"}`}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1897,19 +2006,42 @@ export function ReceiptApp() {
         </div>
       </div>
 
-      {/* Large image preview */}
-      <Dialog open={!!previewImage} onOpenChange={(o) => !o && setImagePreviewId(null)}>
-        <DialogContent className="max-w-5xl">
-          <DialogHeader>
-            <DialogTitle className="font-mono text-sm">{previewImage?.name}</DialogTitle>
-          </DialogHeader>
-          {previewImage?.compressed && (
-            <div className="max-h-[80vh] overflow-auto">
-              <img src={previewImage.compressed.dataUrl} alt={previewImage.name} className="mx-auto block" />
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
+      {/* Large image preview (rotate + zoom loupe + open crop wizard) */}
+      <ImagePreviewDialog
+        open={!!previewImage}
+        onOpenChange={(o) => !o && setImagePreviewId(null)}
+        src={previewImage?.compressed?.dataUrl ?? null}
+        name={previewImage?.name ?? ""}
+        onOpenCropWizard={
+          previewImage
+            ? () => {
+                setCropWizardId(previewImage.id);
+                setCropWizardOpen(true);
+                setImagePreviewId(null);
+              }
+            : undefined
+        }
+      />
+
+      {/* Crop wizard — extract multiple receipts out of one image */}
+      <CropWizard
+        open={cropWizardOpen}
+        onOpenChange={(o) => {
+          setCropWizardOpen(o);
+          if (!o) setCropWizardId(null);
+        }}
+        imageSrc={cropTarget?.compressed?.dataUrl ?? null}
+        imageName={cropTarget?.name ?? ""}
+        aiBoxes={
+          cropTarget?.aiDates
+            ?.map((d) => d.bbox)
+            .filter((b): b is BBox => !!b) ?? []
+        }
+        onExtract={(boxes, removeOriginal) => {
+          if (cropWizardId) extractCroppedParts(cropWizardId, boxes, removeOriginal);
+        }}
+      />
+
 
       {/* Wizard */}
       <Dialog open={wizardOpen} onOpenChange={setWizardOpen}>
