@@ -1956,6 +1956,17 @@ export function ReceiptApp() {
                           <Maximize2 className="h-3 w-3" />
                         </button>
                         <button
+                          className="rounded bg-primary/80 p-1 text-primary-foreground hover:bg-primary"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setCropWizardId(r.id);
+                            setCropWizardOpen(true);
+                          }}
+                          title="Crop multiple receipts out of this image"
+                        >
+                          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><line x1="20" y1="4" x2="8.12" y2="15.88" /><line x1="14.47" y1="14.48" x2="20" y2="20" /><line x1="8.12" y1="8.12" x2="12" y2="12" /></svg>
+                        </button>
+                        <button
                           className={`rounded p-1 text-white ${r.excluded ? "bg-emerald-600/80 hover:bg-emerald-600" : "bg-yellow-600/70 hover:bg-yellow-600"}`}
                           onClick={(e) => {
                             e.stopPropagation();
