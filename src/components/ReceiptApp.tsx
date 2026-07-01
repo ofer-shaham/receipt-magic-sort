@@ -989,6 +989,56 @@ export function ReceiptApp() {
     }
   };
 
+  // Extract N cropped parts from an image using arbitrary user-drawn bboxes.
+  const extractCroppedParts = async (
+    id: string,
+    boxes: BBox[],
+    removeOriginal: boolean,
+  ) => {
+    const r = receipts.find((x) => x.id === id);
+    if (!r || !boxes.length) return;
+    try {
+      const files: File[] = [];
+      for (let i = 0; i < boxes.length; i++) {
+        files.push(await cropImageRegion(r.file, boxes[i], i + 1));
+      }
+      const newReceipts: Receipt[] = files.map((f) => {
+        const ck = makeCacheKey(f);
+        return {
+          id: crypto.randomUUID(),
+          name: f.name,
+          cacheKey: ck,
+          originalSize: f.size,
+          file: f,
+          qualityOverride: null,
+          aiState: "idle",
+        };
+      });
+      setReceipts((prev) => {
+        const idx = prev.findIndex((x) => x.id === id);
+        if (idx < 0) return [...prev, ...newReceipts];
+        const next = [...prev];
+        if (removeOriginal) next.splice(idx, 1, ...newReceipts);
+        else next.splice(idx + 1, 0, ...newReceipts);
+        return next;
+      });
+      toast.success(
+        `Extracted ${files.length} part${files.length === 1 ? "" : "s"}${
+          removeOriginal ? " (original removed)" : ""
+        }`,
+      );
+      setCropWizardOpen(false);
+    } catch (e) {
+      toast.error(`Crop failed: ${(e as Error).message}`);
+      pushLog({
+        level: "error",
+        source: "cropImage",
+        message: (e as Error).message,
+      });
+    }
+  };
+  const cropTarget = receipts.find((r) => r.id === cropWizardId);
+
   // Key management
   const addKey = () => {
     const k = newKey.trim();
