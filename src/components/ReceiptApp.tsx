@@ -3,6 +3,7 @@ import {
   buildPdfsWithLimit,
   buildRenamedArchive,
   compressImage,
+  cropImageRegion,
   extractDateRoundRobin,
   extractImagesFromArchive,
   fetchFreeVisionModelsList,
@@ -13,10 +14,13 @@ import {
   splitImageVertically,
   timestamp,
   type AIDateEntry,
+  type BBox,
   type KeyStatus,
   type OpenRouterCredits,
   type PdfItem,
 } from "@/lib/receipt-utils";
+import { CropWizard } from "@/components/CropWizard";
+import { ImagePreviewDialog } from "@/components/ImagePreviewDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
