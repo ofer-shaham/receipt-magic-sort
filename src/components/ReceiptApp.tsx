@@ -2165,31 +2165,63 @@ function WizardStep({
             )}
           </p>
         )}
-        {receipt.aiDates && receipt.aiDates.length > 1 && (
-          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
-            <p className="mb-2 text-xs font-semibold text-amber-700 dark:text-amber-400">
-              ⚠ AI detected {receipt.aiDates.length} receipts on this image
-            </p>
-            <div className="mb-2 flex flex-wrap gap-1">
-              {receipt.aiDates.map((d, i) => {
-                const active = (d.iso && d.iso === receipt.date) || (!d.iso && d.raw === receipt.dateRaw);
-                return (
-                  <button
-                    key={i}
-                    onClick={() => onPickDetected(d)}
-                    className={`rounded px-2 py-1 font-mono text-[11px] ${active ? "bg-primary text-primary-foreground" : "bg-card hover:bg-accent border"}`}
-                    title="Use this date"
-                  >
-                    {d.raw || d.iso || "?"}
-                  </button>
-                );
-              })}
+        {(() => {
+          const list = receipt.aiDates ?? [];
+          const multi = list.length > 1;
+          return (
+            <div
+              className={`rounded-md border p-2 ${multi ? "border-amber-500/40 bg-amber-500/10" : "border-border bg-muted/30"}`}
+            >
+              <p className={`mb-2 text-xs font-semibold ${multi ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}>
+                {multi
+                  ? `⚠ AI detected ${list.length} receipts on this image`
+                  : `Detected dates (${list.length}) — add another if this image has more receipts`}
+              </p>
+              <div className="mb-2 flex flex-wrap gap-1">
+                {list.map((d, i) => {
+                  const active = (d.iso && d.iso === receipt.date) || (!d.iso && d.raw === receipt.dateRaw);
+                  return (
+                    <span key={i} className={`inline-flex items-center gap-1 rounded border pl-2 pr-1 py-0.5 font-mono text-[11px] ${active ? "bg-primary text-primary-foreground border-primary" : "bg-card"}`}>
+                      <button onClick={() => onPickDetected(d)} title="Use this date" className="hover:underline">
+                        {d.raw || d.iso || "?"}
+                      </button>
+                      <button
+                        onClick={() => onRemoveDate(i)}
+                        title="Remove this detection"
+                        className="ml-0.5 rounded px-1 text-[10px] opacity-70 hover:bg-destructive/20 hover:opacity-100"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  );
+                })}
+                {list.length === 0 && (
+                  <span className="text-[11px] text-muted-foreground">No detections yet.</span>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    if (!iso && !raw) {
+                      toast.error("Set a date below first, then add it.");
+                      return;
+                    }
+                    onAddDate({ iso: iso || null, raw: raw || iso || null });
+                  }}
+                >
+                  + Add current date as detection
+                </Button>
+                {multi && (
+                  <Button size="sm" variant="outline" onClick={onSplit}>
+                    Split image into {list.length} receipts
+                  </Button>
+                )}
+              </div>
             </div>
-            <Button size="sm" variant="outline" onClick={onSplit}>
-              Split image into {receipt.aiDates.length} receipts
-            </Button>
-          </div>
-        )}
+          );
+        })()}
         <div className="space-y-1">
           <Label className="text-xs">Date as printed on receipt</Label>
           <Input
