@@ -1428,7 +1428,48 @@ export function ReceiptApp() {
                     <KeyRound className="h-4 w-4" /> OpenRouter API keys ({apiKeys.length})
                   </span>
                 </AccordionTrigger>
-                <AccordionContent className="space-y-2">
+                <AccordionContent className="space-y-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">AI provider</Label>
+                    <div className="flex gap-2">
+                      {(["auto", "openrouter", "gemini"] as AIProvider[]).map((p) => (
+                        <Button
+                          key={p}
+                          size="sm"
+                          variant={settings.aiProvider === p ? "default" : "outline"}
+                          onClick={() => setSettings((s) => ({ ...s, aiProvider: p }))}
+                          className="text-xs capitalize"
+                        >
+                          {p}
+                        </Button>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-muted-foreground">
+                      Auto uses OpenRouter first and falls back to Gemini on insufficient credits.
+                    </p>
+                  </div>
+                  <div className="space-y-1.5 border-t pt-2">
+                    <Label className="text-xs">Google Gemini API key (direct)</Label>
+                    <Input
+                      type="password"
+                      placeholder="AIza…"
+                      value={settings.geminiApiKey}
+                      onChange={(e) =>
+                        setSettings((s) => ({ ...s, geminiApiKey: e.target.value }))
+                      }
+                      className="text-xs font-mono"
+                    />
+                    <Input
+                      placeholder="gemini-2.0-flash"
+                      value={settings.geminiModel}
+                      onChange={(e) =>
+                        setSettings((s) => ({ ...s, geminiModel: e.target.value }))
+                      }
+                      className="text-xs font-mono"
+                    />
+                  </div>
+                  <div className="border-t pt-2 space-y-2">
+                    <Label className="text-xs">OpenRouter keys</Label>
                   <div className="flex gap-2">
                     <Input
                       type="password"
