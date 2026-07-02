@@ -272,52 +272,19 @@ export class RateLimitError extends Error {
   }
 }
 
-export async function extractDateWithAI(
-  apiKey: string,
-  dataUrl: string,
-  model: string,
-): Promise<AIDateResult> {
-  const img = await loadImage(dataUrl);
-  // Use full image — multiple receipts may appear anywhere in the frame.
-  const canvas = document.createElement("canvas");
-  canvas.width = img.width;
-  canvas.height = img.height;
-  const ctx = canvas.getContext("2d")!;
-  ctx.drawImage(img, 0, 0);
-  const cropped = canvas.toDataURL("image/jpeg", 0.7);
-
-  const prompt =
-    'You are reading one or more retail receipts in an image. For EACH distinct receipt, return its transaction date and a normalized bounding box that tightly frames that receipt. Receipts use DD/MM/YY (or DD/MM/YYYY) — day first, month second; never swap. Reply with ONE LINE of JSON: {"dates":[{"raw":"DD/MM/YY","iso":"YYYY-MM-DD","bbox":{"x":0.05,"y":0.10,"w":0.90,"h":0.40}}, ...]}. bbox coordinates are fractions 0..1 of the FULL image (x,y = top-left corner, w,h = width/height). raw MUST be DD/MM/YY (two-digit day, month, year). If the image contains multiple receipts, include one entry per receipt in reading order. If no date is visible, reply NONE.';
-
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            { type: "image_url", image_url: { url: cropped } },
-          ],
-        },
-      ],
-    }),
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = json?.error?.message || `HTTP ${res.status}`;
-    if (res.status === 429 || /rate.?limit/i.test(msg))
-      throw new RateLimitError(msg);
-    throw new Error(`OpenRouter: ${msg}`);
+export class InsufficientCreditsError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "InsufficientCreditsError";
   }
-  const txt: string = (json.choices?.[0]?.message?.content ?? "").trim();
-  if (/^NONE/i.test(txt)) return { iso: null, raw: null, dates: [] };
+}
 
+export const RECEIPT_PROMPT =
+  'You are reading one or more retail receipts in an image. For EACH distinct receipt, return its transaction date and a normalized bounding box that tightly frames that receipt. Receipts use DD/MM/YY (or DD/MM/YYYY) — day first, month second; never swap. Reply with ONE LINE of JSON: {"dates":[{"raw":"DD/MM/YY","iso":"YYYY-MM-DD","bbox":{"x":0.05,"y":0.10,"w":0.90,"h":0.40}}, ...]}. bbox coordinates are fractions 0..1 of the FULL image (x,y = top-left corner, w,h = width/height). raw MUST be DD/MM/YY (two-digit day, month, year). If the image contains multiple receipts, include one entry per receipt in reading order. If no date is visible, reply NONE.';
+
+export function parseReceiptDatesText(txt: string): AIDateResult {
+  const trimmed = (txt ?? "").trim();
+  if (!trimmed || /^NONE/i.test(trimmed)) return { iso: null, raw: null, dates: [] };
   const normalize = (obj: any): AIDateEntry => {
     const iso =
       typeof obj?.iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(obj.iso)
@@ -334,8 +301,7 @@ export async function extractDateWithAI(
     }
     return { iso, raw: raw ?? iso, bbox };
   };
-
-  const objMatch = txt.match(/\{[\s\S]*\}/);
+  const objMatch = trimmed.match(/\{[\s\S]*\}/);
   if (objMatch) {
     try {
       const obj = JSON.parse(objMatch[0]);
@@ -354,8 +320,103 @@ export async function extractDateWithAI(
       /* ignore */
     }
   }
-  const iso = txt.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? null;
+  const iso = trimmed.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? null;
   return { iso, raw: iso, dates: iso ? [{ iso, raw: iso }] : [] };
+}
+
+function dataUrlToBase64(dataUrl: string): { mime: string; b64: string } {
+  const m = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
+  if (!m) return { mime: "image/jpeg", b64: dataUrl };
+  return { mime: m[1], b64: m[2] };
+}
+
+export async function extractDateWithGemini(
+  apiKey: string,
+  dataUrl: string,
+  model = "gemini-2.0-flash",
+): Promise<AIDateResult> {
+  const img = await loadImage(dataUrl);
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(img, 0, 0);
+  const jpg = canvas.toDataURL("image/jpeg", 0.7);
+  const { b64 } = dataUrlToBase64(jpg);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    model,
+  )}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [
+            { text: RECEIPT_PROMPT },
+            { inline_data: { mime_type: "image/jpeg", data: b64 } },
+          ],
+        },
+      ],
+    }),
+  });
+  const json: any = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = json?.error?.message || `HTTP ${res.status}`;
+    if (res.status === 429 || /rate.?limit|quota/i.test(msg))
+      throw new RateLimitError(msg);
+    throw new Error(`Gemini: ${msg}`);
+  }
+  const parts = json?.candidates?.[0]?.content?.parts ?? [];
+  const txt = parts.map((p: any) => p?.text ?? "").join("").trim();
+  return parseReceiptDatesText(txt);
+}
+
+export async function extractDateWithAI(
+  apiKey: string,
+  dataUrl: string,
+  model: string,
+): Promise<AIDateResult> {
+  const img = await loadImage(dataUrl);
+  // Use full image — multiple receipts may appear anywhere in the frame.
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(img, 0, 0);
+  const cropped = canvas.toDataURL("image/jpeg", 0.7);
+
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: RECEIPT_PROMPT },
+            { type: "image_url", image_url: { url: cropped } },
+          ],
+        },
+      ],
+    }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = json?.error?.message || `HTTP ${res.status}`;
+    const code = json?.error?.code;
+    if (res.status === 402 || code === 402 || /insufficient credit/i.test(msg))
+      throw new InsufficientCreditsError(`OpenRouter: ${msg}`);
+    if (res.status === 429 || /rate.?limit/i.test(msg))
+      throw new RateLimitError(msg);
+    throw new Error(`OpenRouter: ${msg}`);
+  }
+  const txt: string = (json.choices?.[0]?.message?.content ?? "").trim();
+  return parseReceiptDatesText(txt);
 }
 
 // Split a single image into N horizontal slices (top-to-bottom) for the

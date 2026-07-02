@@ -12,6 +12,10 @@ import {
   FREE_VISION_MODELS,
   safeSlug,
   timestamp,
+  extractDateWithGemini,
+  InsufficientCreditsError,
+  type AIDateEntry,
+  type AIDateResult,
   type BBox,
   type KeyStatus,
   type OpenRouterCredits,
@@ -67,6 +71,8 @@ type Receipt = {
   aiState: "idle" | "queued" | "loading" | "done" | "error";
   // Timestamp of last user interaction on this receipt
   lastModified?: number;
+  // Raw AI detections (may include multiple receipts per image).
+  aiDates?: AIDateEntry[];
 };
 
 type LogCategory = "user" | "token" | "client" | "server" | "third-party";
@@ -137,6 +143,8 @@ type SectionKey =
 
 type SortMode = "date" | "modified";
 
+type AIProvider = "openrouter" | "gemini" | "auto";
+
 type Settings = {
   minKeyIntervalSec: number;
   maxPdfSizeMB: number;
@@ -149,7 +157,11 @@ type Settings = {
   cooldownSec: number;
   autoSaveEnabled: boolean;
   autoSaveIntervalSec: number;
+  splitMultiReceipt: boolean;
   visibleSections: Record<SectionKey, boolean>;
+  aiProvider: AIProvider;
+  geminiApiKey: string;
+  geminiModel: string;
 };
 const DEFAULT_SETTINGS: Settings = {
   minKeyIntervalSec: 0,
@@ -163,6 +175,7 @@ const DEFAULT_SETTINGS: Settings = {
   cooldownSec: 65,
   autoSaveEnabled: false,
   autoSaveIntervalSec: 60,
+  splitMultiReceipt: false,
   visibleSections: {
     actions: true,
     quality: true,
@@ -171,6 +184,9 @@ const DEFAULT_SETTINGS: Settings = {
     years: true,
     "report-opts": true,
   },
+  aiProvider: "auto",
+  geminiApiKey: "",
+  geminiModel: "gemini-2.0-flash",
 };
 
 function loadSettings(): Settings {
@@ -766,19 +782,60 @@ export function ReceiptApp() {
         prev.map((x) => (x.id === r.id ? { ...x, aiState: "loading" } : x)),
       );
       try {
-        const { result, nextIndex, usedKeyIndex } = await extractDateRoundRobin(
-          apiKeys,
-          keyStateRef.current,
-          keyIndexRef.current,
-          r.compressed!.dataUrl,
-          model,
-          {
-            minIntervalMs: settings.minKeyIntervalSec * 1000,
-            cooldownAfterFailures: settings.cooldownAfterFailures,
-            cooldownMs: settings.cooldownSec * 1000,
-          },
-        );
-        keyIndexRef.current = nextIndex;
+        const provider = settings.aiProvider;
+        const hasOR = apiKeys.length > 0;
+        const hasGemini = !!settings.geminiApiKey.trim();
+        const useGemini =
+          provider === "gemini" ||
+          (provider === "auto" && !hasOR && hasGemini);
+        let result: AIDateResult;
+        let sourceLabel = "gemini";
+        if (useGemini) {
+          if (!hasGemini) throw new Error("Gemini API key is not set");
+          result = await extractDateWithGemini(
+            settings.geminiApiKey.trim(),
+            r.compressed!.dataUrl,
+            settings.geminiModel || "gemini-2.0-flash",
+          );
+        } else {
+          try {
+            const rr = await extractDateRoundRobin(
+              apiKeys,
+              keyStateRef.current,
+              keyIndexRef.current,
+              r.compressed!.dataUrl,
+              model,
+              {
+                minIntervalMs: settings.minKeyIntervalSec * 1000,
+                cooldownAfterFailures: settings.cooldownAfterFailures,
+                cooldownMs: settings.cooldownSec * 1000,
+              },
+            );
+            keyIndexRef.current = rr.nextIndex;
+            result = rr.result;
+            sourceLabel = `openrouter/key#${rr.usedKeyIndex + 1}`;
+          } catch (err) {
+            if (
+              err instanceof InsufficientCreditsError &&
+              provider === "auto" &&
+              hasGemini
+            ) {
+              pushLog({
+                category: "third-party",
+                level: "warn",
+                source: "openrouter",
+                message: `Falling back to Gemini: ${(err as Error).message}`,
+              });
+              result = await extractDateWithGemini(
+                settings.geminiApiKey.trim(),
+                r.compressed!.dataUrl,
+                settings.geminiModel || "gemini-2.0-flash",
+              );
+            } else {
+              throw err;
+            }
+          }
+        }
 
         dateCache.current[r.cacheKey] = {
           iso: result.iso,
@@ -797,6 +854,7 @@ export function ReceiptApp() {
                   dateSource: "ai",
                   approved: false,
                   aiState: "done",
+                  aiDates: result.dates,
                   lastModified: Date.now(),
                 }
               : x,
@@ -806,7 +864,7 @@ export function ReceiptApp() {
         pushLog({
           category: "third-party",
           level: "info",
-          source: `openrouter/key#${usedKeyIndex + 1}`,
+          source: sourceLabel,
           message: `${r.name} → ${result.raw ?? "NONE"} (${result.iso ?? "—"})`,
         });
         pushUserAction("ai-extract", r.id, r.name, result.raw || result.iso || "no date");
@@ -1370,7 +1428,48 @@ export function ReceiptApp() {
                     <KeyRound className="h-4 w-4" /> OpenRouter API keys ({apiKeys.length})
                   </span>
                 </AccordionTrigger>
-                <AccordionContent className="space-y-2">
+                <AccordionContent className="space-y-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">AI provider</Label>
+                    <div className="flex gap-2">
+                      {(["auto", "openrouter", "gemini"] as AIProvider[]).map((p) => (
+                        <Button
+                          key={p}
+                          size="sm"
+                          variant={settings.aiProvider === p ? "default" : "outline"}
+                          onClick={() => setSettings((s) => ({ ...s, aiProvider: p }))}
+                          className="text-xs capitalize"
+                        >
+                          {p}
+                        </Button>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-muted-foreground">
+                      Auto uses OpenRouter first and falls back to Gemini on insufficient credits.
+                    </p>
+                  </div>
+                  <div className="space-y-1.5 border-t pt-2">
+                    <Label className="text-xs">Google Gemini API key (direct)</Label>
+                    <Input
+                      type="password"
+                      placeholder="AIza…"
+                      value={settings.geminiApiKey}
+                      onChange={(e) =>
+                        setSettings((s) => ({ ...s, geminiApiKey: e.target.value }))
+                      }
+                      className="text-xs font-mono"
+                    />
+                    <Input
+                      placeholder="gemini-2.0-flash"
+                      value={settings.geminiModel}
+                      onChange={(e) =>
+                        setSettings((s) => ({ ...s, geminiModel: e.target.value }))
+                      }
+                      className="text-xs font-mono"
+                    />
+                  </div>
+                  <div className="border-t pt-2 space-y-2">
+                    <Label className="text-xs">OpenRouter keys</Label>
                   <div className="flex gap-2">
                     <Input
                       type="password"
@@ -1462,6 +1561,7 @@ export function ReceiptApp() {
                       />
                       <span className="text-xs text-muted-foreground">sec</span>
                     </div>
+                  </div>
                   </div>
                 </AccordionContent>
               </AccordionItem>
@@ -2015,8 +2115,14 @@ export function ReceiptApp() {
                 if (wizardPos < wizardQueue.length - 1) setWizardPos((i) => i + 1);
               }}
               onRunAI={async () => {
-                if (!apiKeys.length) {
-                  toast.error("Add at least one OpenRouter API key");
+                const provider = settings.aiProvider;
+                const hasOR = apiKeys.length > 0;
+                const hasGemini = !!settings.geminiApiKey.trim();
+                const useGemini =
+                  provider === "gemini" ||
+                  (provider === "auto" && !hasOR && hasGemini);
+                if (!useGemini && !hasOR) {
+                  toast.error("Add an OpenRouter or Gemini API key");
                   return;
                 }
                 if (!wizardReceipt.compressed) {
@@ -2027,22 +2133,52 @@ export function ReceiptApp() {
                   prev.map((x) => (x.id === wizardReceipt.id ? { ...x, aiState: "loading" } : x)),
                 );
                 try {
-                  const { result } = await extractDateRoundRobin(
-                    apiKeys,
-                    keyStateRef.current,
-                    keyIndexRef.current,
-                    wizardReceipt.compressed!.dataUrl,
-                    model,
-                    {
-                      minIntervalMs: settings.minKeyIntervalSec * 1000,
-                      cooldownAfterFailures: settings.cooldownAfterFailures,
-                      cooldownMs: settings.cooldownSec * 1000,
-                    },
-                  );
+                  let result: AIDateResult;
+                  let sourceLabel = "gemini";
+                  if (useGemini) {
+                    result = await extractDateWithGemini(
+                      settings.geminiApiKey.trim(),
+                      wizardReceipt.compressed!.dataUrl,
+                      settings.geminiModel || "gemini-2.0-flash",
+                    );
+                  } else {
+                    try {
+                      const rr = await extractDateRoundRobin(
+                        apiKeys,
+                        keyStateRef.current,
+                        keyIndexRef.current,
+                        wizardReceipt.compressed!.dataUrl,
+                        model,
+                        {
+                          minIntervalMs: settings.minKeyIntervalSec * 1000,
+                          cooldownAfterFailures: settings.cooldownAfterFailures,
+                          cooldownMs: settings.cooldownSec * 1000,
+                        },
+                      );
+                      keyIndexRef.current = rr.nextIndex;
+                      result = rr.result;
+                      sourceLabel = `openrouter/key#${rr.usedKeyIndex + 1}`;
+                    } catch (err) {
+                      if (
+                        err instanceof InsufficientCreditsError &&
+                        provider === "auto" &&
+                        hasGemini
+                      ) {
+                        result = await extractDateWithGemini(
+                          settings.geminiApiKey.trim(),
+                          wizardReceipt.compressed!.dataUrl,
+                          settings.geminiModel || "gemini-2.0-flash",
+                        );
+                        sourceLabel = "gemini (fallback)";
+                      } else {
+                        throw err;
+                      }
+                    }
+                  }
                   setReceipts((prev) =>
                     prev.map((x) =>
                       x.id === wizardReceipt.id
-                        ? { ...x, aiState: "done" }
+                        ? { ...x, aiState: "done", aiDates: result.dates }
                         : x,
                     ),
                   );
@@ -2051,7 +2187,7 @@ export function ReceiptApp() {
                     pushLog({
                       category: "third-party",
                       level: "info",
-                      source: "openrouter",
+                      source: sourceLabel,
                       message: `${wizardReceipt.name} → ${result.raw ?? result.iso}`,
                     });
                     pushUserAction("ai-extract", wizardReceipt.id, wizardReceipt.name, result.raw || result.iso || "no date");
@@ -2108,6 +2244,7 @@ export function ReceiptApp() {
                 <Button
                   size="sm"
                   onClick={() => {
+                    if (!wizardReceipt) return;
                     const src = wizardReceipt.dateSource === "ai" ? "ai" : "manual";
                     setReceiptDate(wizardReceipt.id, wizardPendingDate.iso, wizardPendingDate.raw, src, { approved: true });
                     setWizardPendingDate(null);
