@@ -2073,8 +2073,14 @@ export function ReceiptApp() {
                 if (wizardPos < wizardQueue.length - 1) setWizardPos((i) => i + 1);
               }}
               onRunAI={async () => {
-                if (!apiKeys.length) {
-                  toast.error("Add at least one OpenRouter API key");
+                const provider = settings.aiProvider;
+                const hasOR = apiKeys.length > 0;
+                const hasGemini = !!settings.geminiApiKey.trim();
+                const useGemini =
+                  provider === "gemini" ||
+                  (provider === "auto" && !hasOR && hasGemini);
+                if (!useGemini && !hasOR) {
+                  toast.error("Add an OpenRouter or Gemini API key");
                   return;
                 }
                 if (!wizardReceipt.compressed) {
@@ -2085,22 +2091,52 @@ export function ReceiptApp() {
                   prev.map((x) => (x.id === wizardReceipt.id ? { ...x, aiState: "loading" } : x)),
                 );
                 try {
-                  const { result } = await extractDateRoundRobin(
-                    apiKeys,
-                    keyStateRef.current,
-                    keyIndexRef.current,
-                    wizardReceipt.compressed!.dataUrl,
-                    model,
-                    {
-                      minIntervalMs: settings.minKeyIntervalSec * 1000,
-                      cooldownAfterFailures: settings.cooldownAfterFailures,
-                      cooldownMs: settings.cooldownSec * 1000,
-                    },
-                  );
+                  let result: AIDateResult;
+                  let sourceLabel = "gemini";
+                  if (useGemini) {
+                    result = await extractDateWithGemini(
+                      settings.geminiApiKey.trim(),
+                      wizardReceipt.compressed!.dataUrl,
+                      settings.geminiModel || "gemini-2.0-flash",
+                    );
+                  } else {
+                    try {
+                      const rr = await extractDateRoundRobin(
+                        apiKeys,
+                        keyStateRef.current,
+                        keyIndexRef.current,
+                        wizardReceipt.compressed!.dataUrl,
+                        model,
+                        {
+                          minIntervalMs: settings.minKeyIntervalSec * 1000,
+                          cooldownAfterFailures: settings.cooldownAfterFailures,
+                          cooldownMs: settings.cooldownSec * 1000,
+                        },
+                      );
+                      keyIndexRef.current = rr.nextIndex;
+                      result = rr.result;
+                      sourceLabel = `openrouter/key#${rr.usedKeyIndex + 1}`;
+                    } catch (err) {
+                      if (
+                        err instanceof InsufficientCreditsError &&
+                        provider === "auto" &&
+                        hasGemini
+                      ) {
+                        result = await extractDateWithGemini(
+                          settings.geminiApiKey.trim(),
+                          wizardReceipt.compressed!.dataUrl,
+                          settings.geminiModel || "gemini-2.0-flash",
+                        );
+                        sourceLabel = "gemini (fallback)";
+                      } else {
+                        throw err;
+                      }
+                    }
+                  }
                   setReceipts((prev) =>
                     prev.map((x) =>
                       x.id === wizardReceipt.id
-                        ? { ...x, aiState: "done" }
+                        ? { ...x, aiState: "done", aiDates: result.dates }
                         : x,
                     ),
                   );
@@ -2109,7 +2145,7 @@ export function ReceiptApp() {
                     pushLog({
                       category: "third-party",
                       level: "info",
-                      source: "openrouter",
+                      source: sourceLabel,
                       message: `${wizardReceipt.name} → ${result.raw ?? result.iso}`,
                     });
                     pushUserAction("ai-extract", wizardReceipt.id, wizardReceipt.name, result.raw || result.iso || "no date");
