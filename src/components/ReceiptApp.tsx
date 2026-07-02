@@ -782,19 +782,60 @@ export function ReceiptApp() {
         prev.map((x) => (x.id === r.id ? { ...x, aiState: "loading" } : x)),
       );
       try {
-        const { result, nextIndex, usedKeyIndex } = await extractDateRoundRobin(
-          apiKeys,
-          keyStateRef.current,
-          keyIndexRef.current,
-          r.compressed!.dataUrl,
-          model,
-          {
-            minIntervalMs: settings.minKeyIntervalSec * 1000,
-            cooldownAfterFailures: settings.cooldownAfterFailures,
-            cooldownMs: settings.cooldownSec * 1000,
-          },
-        );
-        keyIndexRef.current = nextIndex;
+        const provider = settings.aiProvider;
+        const hasOR = apiKeys.length > 0;
+        const hasGemini = !!settings.geminiApiKey.trim();
+        const useGemini =
+          provider === "gemini" ||
+          (provider === "auto" && !hasOR && hasGemini);
+        let result: AIDateResult;
+        let sourceLabel = "gemini";
+        if (useGemini) {
+          if (!hasGemini) throw new Error("Gemini API key is not set");
+          result = await extractDateWithGemini(
+            settings.geminiApiKey.trim(),
+            r.compressed!.dataUrl,
+            settings.geminiModel || "gemini-2.0-flash",
+          );
+        } else {
+          try {
+            const rr = await extractDateRoundRobin(
+              apiKeys,
+              keyStateRef.current,
+              keyIndexRef.current,
+              r.compressed!.dataUrl,
+              model,
+              {
+                minIntervalMs: settings.minKeyIntervalSec * 1000,
+                cooldownAfterFailures: settings.cooldownAfterFailures,
+                cooldownMs: settings.cooldownSec * 1000,
+              },
+            );
+            keyIndexRef.current = rr.nextIndex;
+            result = rr.result;
+            sourceLabel = `openrouter/key#${rr.usedKeyIndex + 1}`;
+          } catch (err) {
+            if (
+              err instanceof InsufficientCreditsError &&
+              provider === "auto" &&
+              hasGemini
+            ) {
+              pushLog({
+                category: "third-party",
+                level: "warn",
+                source: "openrouter",
+                message: `Falling back to Gemini: ${(err as Error).message}`,
+              });
+              result = await extractDateWithGemini(
+                settings.geminiApiKey.trim(),
+                r.compressed!.dataUrl,
+                settings.geminiModel || "gemini-2.0-flash",
+              );
+            } else {
+              throw err;
+            }
+          }
+        }
 
         dateCache.current[r.cacheKey] = {
           iso: result.iso,
@@ -813,6 +854,7 @@ export function ReceiptApp() {
                   dateSource: "ai",
                   approved: false,
                   aiState: "done",
+                  aiDates: result.dates,
                   lastModified: Date.now(),
                 }
               : x,
@@ -822,7 +864,7 @@ export function ReceiptApp() {
         pushLog({
           category: "third-party",
           level: "info",
-          source: `openrouter/key#${usedKeyIndex + 1}`,
+          source: sourceLabel,
           message: `${r.name} → ${result.raw ?? "NONE"} (${result.iso ?? "—"})`,
         });
         pushUserAction("ai-extract", r.id, r.name, result.raw || result.iso || "no date");
