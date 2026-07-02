@@ -233,7 +233,7 @@ export const FREE_VISION_MODELS = [
 // Fetch fresh list of free vision-capable models from OpenRouter.
 export async function fetchFreeVisionModelsList(): Promise<string[]> {
   const url =
-    "https://openrouter.ai/api/frontend/v1/models/find?active=true&fmt=cards&input_modalities=image&max_price=0&order=pricing-low-to-high";
+    "https://openrouter.ai/api/frontend/v1/models/find?active=true&fmt=cards&input_modalities=image&max_price=0&order=pricing-low-to-high&output_modalities=text";
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Models fetch: HTTP ${res.status}`);
   const j: any = await res.json().catch(() => ({}));
