@@ -1562,6 +1562,7 @@ export function ReceiptApp() {
                       <span className="text-xs text-muted-foreground">sec</span>
                     </div>
                   </div>
+                  </div>
                 </AccordionContent>
               </AccordionItem>
               )}
