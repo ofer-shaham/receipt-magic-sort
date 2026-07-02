@@ -71,6 +71,8 @@ type Receipt = {
   aiState: "idle" | "queued" | "loading" | "done" | "error";
   // Timestamp of last user interaction on this receipt
   lastModified?: number;
+  // Raw AI detections (may include multiple receipts per image).
+  aiDates?: AIDateEntry[];
 };
 
 type LogCategory = "user" | "token" | "client" | "server" | "third-party";
