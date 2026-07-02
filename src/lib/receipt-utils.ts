@@ -386,9 +386,6 @@ export async function extractDateWithAI(
   ctx.drawImage(img, 0, 0);
   const cropped = canvas.toDataURL("image/jpeg", 0.7);
 
-  const prompt =
-    'You are reading one or more retail receipts in an image. For EACH distinct receipt, return its transaction date and a normalized bounding box that tightly frames that receipt. Receipts use DD/MM/YY (or DD/MM/YYYY) — day first, month second; never swap. Reply with ONE LINE of JSON: {"dates":[{"raw":"DD/MM/YY","iso":"YYYY-MM-DD","bbox":{"x":0.05,"y":0.10,"w":0.90,"h":0.40}}, ...]}. bbox coordinates are fractions 0..1 of the FULL image (x,y = top-left corner, w,h = width/height). raw MUST be DD/MM/YY (two-digit day, month, year). If the image contains multiple receipts, include one entry per receipt in reading order. If no date is visible, reply NONE.';
-
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -401,7 +398,7 @@ export async function extractDateWithAI(
         {
           role: "user",
           content: [
-            { type: "text", text: prompt },
+            { type: "text", text: RECEIPT_PROMPT },
             { type: "image_url", image_url: { url: cropped } },
           ],
         },
@@ -411,51 +408,15 @@ export async function extractDateWithAI(
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
     const msg = json?.error?.message || `HTTP ${res.status}`;
+    const code = json?.error?.code;
+    if (res.status === 402 || code === 402 || /insufficient credit/i.test(msg))
+      throw new InsufficientCreditsError(`OpenRouter: ${msg}`);
     if (res.status === 429 || /rate.?limit/i.test(msg))
       throw new RateLimitError(msg);
     throw new Error(`OpenRouter: ${msg}`);
   }
   const txt: string = (json.choices?.[0]?.message?.content ?? "").trim();
-  if (/^NONE/i.test(txt)) return { iso: null, raw: null, dates: [] };
-
-  const normalize = (obj: any): AIDateEntry => {
-    const iso =
-      typeof obj?.iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(obj.iso)
-        ? obj.iso
-        : null;
-    const raw = typeof obj?.raw === "string" ? obj.raw : null;
-    let bbox: BBox | null = null;
-    const b = obj?.bbox;
-    if (b && typeof b === "object") {
-      const nx = Number(b.x), ny = Number(b.y), nw = Number(b.w), nh = Number(b.h);
-      if ([nx, ny, nw, nh].every((v) => Number.isFinite(v) && v >= 0 && v <= 1)) {
-        bbox = { x: nx, y: ny, w: Math.min(nw, 1 - nx), h: Math.min(nh, 1 - ny) };
-      }
-    }
-    return { iso, raw: raw ?? iso, bbox };
-  };
-
-  const objMatch = txt.match(/\{[\s\S]*\}/);
-  if (objMatch) {
-    try {
-      const obj = JSON.parse(objMatch[0]);
-      if (Array.isArray(obj?.dates) && obj.dates.length) {
-        const dates: AIDateEntry[] = obj.dates
-          .map(normalize)
-          .filter((d: AIDateEntry) => d.iso || d.raw);
-        if (dates.length)
-          return { iso: dates[0].iso, raw: dates[0].raw, dates };
-      }
-      if (obj?.iso || obj?.raw) {
-        const single = normalize(obj);
-        return { iso: single.iso, raw: single.raw, dates: [single] };
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-  const iso = txt.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? null;
-  return { iso, raw: iso, dates: iso ? [{ iso, raw: iso }] : [] };
+  return parseReceiptDatesText(txt);
 }
 
 // Split a single image into N horizontal slices (top-to-bottom) for the
