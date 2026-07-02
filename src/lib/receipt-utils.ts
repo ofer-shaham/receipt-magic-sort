@@ -227,6 +227,7 @@ export const FREE_VISION_MODELS = [
   "meta-llama/llama-3.2-11b-vision-instruct:free",
   "qwen/qwen2.5-vl-72b-instruct:free",
   "google/gemini-2.0-flash-exp:free",
+  "openrouter/auto:free"
 ] as const;
 
 // Fetch fresh list of free vision-capable models from OpenRouter.
