@@ -2108,6 +2108,7 @@ export function ReceiptApp() {
                 <Button
                   size="sm"
                   onClick={() => {
+                    if (!wizardReceipt) return;
                     const src = wizardReceipt.dateSource === "ai" ? "ai" : "manual";
                     setReceiptDate(wizardReceipt.id, wizardPendingDate.iso, wizardPendingDate.raw, src, { approved: true });
                     setWizardPendingDate(null);
