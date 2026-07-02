@@ -11,9 +11,7 @@ import {
   formatBytes,
   FREE_VISION_MODELS,
   safeSlug,
-  splitImageVertically,
   timestamp,
-  type AIDateEntry,
   type BBox,
   type KeyStatus,
   type OpenRouterCredits,
@@ -39,38 +37,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import {
-  Upload,
-  Download,
-  Sparkles,
-  ArrowUpDown,
-  X,
-  Loader2,
-  FileText,
-  KeyRound,
-  AlertTriangle,
-  ExternalLink,
-  Trash2,
-  RefreshCw,
-  Tag,
-  Archive,
-  Wand2,
-  ChevronLeft,
-  ChevronRight,
-  Plus,
-  Sun,
-  Moon,
-  Droplet,
-  FileDown,
-  Upload as UploadIcon,
-  TableIcon,
-  Maximize2,
-  Check,
-  Settings as SettingsIcon,
-  EyeOff,
-  Copy,
-} from "lucide-react";
+import { Upload, Download, Sparkles, ArrowUpDown, X, Loader as Loader2, FileText, KeyRound, TriangleAlert as AlertTriangle, ExternalLink, Trash2, RefreshCw, Tag, Archive, Wand as Wand2, ChevronLeft, ChevronRight, Plus, Sun, Moon, Droplet, FileDown, Upload as UploadIcon, Table as TableIcon, Maximize2, Check, Settings as SettingsIcon, EyeOff, Copy, Clock } from "lucide-react";
 
 type DateSource = "ai" | "manual";
 type Theme = "light" | "dark" | "blue";
@@ -93,20 +62,33 @@ type Receipt = {
   date?: string | null;
   dateRaw?: string | null;
   dateSource?: DateSource;
-  // All dates the AI detected on this image (>=1). Used for multi-receipt review.
-  aiDates?: AIDateEntry[];
   // User has confirmed the displayed date is correct.
   approved?: boolean;
   aiState: "idle" | "queued" | "loading" | "done" | "error";
+  // Timestamp of last user interaction on this receipt
+  lastModified?: number;
 };
+
+type LogCategory = "user" | "token" | "client" | "server" | "third-party";
 
 type LogEntry = {
   id: string;
   ts: number;
   level: "error" | "warn" | "info";
+  category: LogCategory;
   source: string;
   message: string;
+  details?: Record<string, unknown>;
   stack?: string;
+};
+
+type UserActionLog = {
+  id: string;
+  ts: number;
+  action: string;
+  imageId: string;
+  imageName: string;
+  details?: string;
 };
 
 const DATE_CACHE_KEY = "receipt-date-cache-v3";
@@ -122,7 +104,6 @@ type CachedDate = {
   iso: string | null;
   raw: string | null;
   source?: DateSource;
-  aiDates?: AIDateEntry[];
   approved?: boolean;
 };
 
@@ -154,6 +135,8 @@ type SectionKey =
   | "years"
   | "report-opts";
 
+type SortMode = "date" | "modified";
+
 type Settings = {
   minKeyIntervalSec: number;
   maxPdfSizeMB: number;
@@ -166,9 +149,6 @@ type Settings = {
   cooldownSec: number;
   autoSaveEnabled: boolean;
   autoSaveIntervalSec: number;
-  // When AI detects multiple receipt dates on a single image, auto-split the
-  // image into N horizontal slices and treat each slice as its own receipt.
-  splitMultiReceipt: boolean;
   visibleSections: Record<SectionKey, boolean>;
 };
 const DEFAULT_SETTINGS: Settings = {
@@ -183,7 +163,6 @@ const DEFAULT_SETTINGS: Settings = {
   cooldownSec: 65,
   autoSaveEnabled: false,
   autoSaveIntervalSec: 60,
-  splitMultiReceipt: false,
   visibleSections: {
     actions: true,
     quality: true,
@@ -234,6 +213,7 @@ export function ReceiptApp() {
   const [building, setBuilding] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [userActionLogs, setUserActionLogs] = useState<UserActionLog[]>([]);
   const [credits, setCredits] = useState<OpenRouterCredits | null>(null);
   const [creditsLoading, setCreditsLoading] = useState(false);
   const [previewScale, setPreviewScale] = useState(220);
@@ -241,10 +221,12 @@ export function ReceiptApp() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardQueue, setWizardQueue] = useState<string[]>([]);
   const [wizardPos, setWizardPos] = useState(0);
+  const [wizardPendingDate, setWizardPendingDate] = useState<{ iso: string | null; raw: string | null } | null>(null);
   const [aiRunning, setAiRunning] = useState(false);
   const [aiProgress, setAiProgress] = useState({ done: 0, total: 0 });
   const [theme, setTheme] = useState<Theme>("light");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [sortMode, setSortMode] = useState<SortMode>("date");
   const [reportOpen, setReportOpen] = useState(false);
   const [matrixOpen, setMatrixOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
@@ -261,11 +243,30 @@ export function ReceiptApp() {
   const cancelAIRef = useRef(false);
   const importFileRef = useRef<HTMLInputElement>(null);
 
-  const pushLog = useCallback((entry: Omit<LogEntry, "id" | "ts">) => {
+  const pushLog = useCallback((entry: Omit<LogEntry, "id" | "ts" | "category"> & { category?: LogCategory }) => {
+    const category = entry.category ?? "client";
     setLogs((prev) =>
-      [{ ...entry, id: crypto.randomUUID(), ts: Date.now() }, ...prev].slice(0, 80),
+      [{ ...entry, id: crypto.randomUUID(), ts: Date.now(), category }, ...prev].slice(0, 200),
     );
   }, []);
+
+  const pushUserAction = useCallback((action: string, imageId: string, imageName: string, details?: string) => {
+    const entry: UserActionLog = {
+      id: crypto.randomUUID(),
+      ts: Date.now(),
+      action,
+      imageId,
+      imageName,
+      details,
+    };
+    setUserActionLogs((prev) => [entry, ...prev].slice(0, 200));
+    pushLog({
+      category: "user",
+      level: "info",
+      source: "user-action",
+      message: `${action}: ${imageName}${details ? ` (${details})` : ""}`,
+    });
+  }, [pushLog]);
 
   // Initial load
   useEffect(() => {
@@ -394,17 +395,40 @@ export function ReceiptApp() {
     };
   }, [receipts, globalQuality, pushLog]);
 
-  // Auto-sorted receipts (display & PDF order)
+  // Deduplicated & auto-sorted receipts (display & PDF order)
   const sortedReceipts = useMemo(() => {
-    const withD = receipts.filter((r) => r.date);
-    const without = receipts.filter((r) => !r.date);
-    withD.sort((a, b) =>
-      sortDir === "asc"
-        ? (a.date! < b.date! ? -1 : 1)
-        : (a.date! > b.date! ? -1 : 1),
-    );
-    return [...withD, ...without];
-  }, [receipts, sortDir]);
+    // Deduplicate: keep most recent modification per cacheKey
+    const byCacheKey = new Map<string, Receipt>();
+    for (const r of receipts) {
+      const existing = byCacheKey.get(r.cacheKey);
+      if (!existing || (r.lastModified ?? 0) > (existing.lastModified ?? 0)) {
+        byCacheKey.set(r.cacheKey, r);
+      }
+    }
+    const deduped = Array.from(byCacheKey.values());
+
+    // Sort based on mode
+    const withDate = deduped.filter((r) => r.date);
+    const withoutDate = deduped.filter((r) => !r.date);
+
+    if (sortMode === "date") {
+      withDate.sort((a, b) =>
+        sortDir === "asc"
+          ? (a.date! < b.date! ? -1 : 1)
+          : (a.date! > b.date! ? -1 : 1),
+      );
+    } else {
+      // Sort by lastModified timestamp
+      const all = [...withDate, ...withoutDate];
+      all.sort((a, b) => {
+        const aMod = a.lastModified ?? 0;
+        const bMod = b.lastModified ?? 0;
+        return sortDir === "asc" ? aMod - bMod : bMod - aMod;
+      });
+      return all;
+    }
+    return [...withDate, ...withoutDate];
+  }, [receipts, sortDir, sortMode]);
 
   // Manual PDF build — user-triggered. Auto-clear PDFs when no receipts.
   useEffect(() => {
@@ -496,6 +520,7 @@ export function ReceiptApp() {
   ]);
 
   const ingestImageFiles = useCallback(async (arr: File[]) => {
+    const now = Date.now();
     const newOnes: Receipt[] = arr.map((file) => {
       const cacheKey = makeCacheKey(file);
       const cached = dateCache.current[cacheKey];
@@ -509,13 +534,19 @@ export function ReceiptApp() {
         date: cached?.iso ?? undefined,
         dateRaw: cached?.raw ?? undefined,
         dateSource: cached?.source,
-        aiDates: cached?.aiDates,
         approved: cached?.approved,
         aiState: "idle",
+        lastModified: now,
       };
     });
     setReceipts((prev) => [...prev, ...newOnes]);
-  }, []);
+    pushLog({
+      category: "client",
+      level: "info",
+      source: "ingest",
+      message: `Ingested ${newOnes.length} image(s)`,
+    });
+  }, [pushLog]);
 
   const handleFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -555,16 +586,24 @@ export function ReceiptApp() {
     if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
   };
 
-  const removeReceipt = (id: string) => {
-    setReceipts((prev) => prev.filter((r) => r.id !== id));
+  const removeReceipt = useCallback((id: string) => {
+    const r = receipts.find((x) => x.id === id);
+    setReceipts((prev) => prev.filter((x) => x.id !== id));
     if (selectedId === id) setSelectedId(null);
-  };
+    if (r) {
+      pushUserAction("removed", id, r.name);
+    }
+  }, [receipts, selectedId, pushUserAction]);
 
-  const toggleExclude = (id: string) => {
+  const toggleExclude = useCallback((id: string) => {
+    const r = receipts.find((x) => x.id === id);
     setReceipts((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, excluded: !r.excluded } : r)),
+      prev.map((x) => (x.id === id ? { ...x, excluded: !x.excluded, lastModified: Date.now() } : x)),
     );
-  };
+    if (r) {
+      pushUserAction("toggle-exclude", id, r.name, r.excluded ? "include" : "exclude");
+    }
+  }, [receipts, pushUserAction]);
 
   const copyToClipboard = async (text: string) => {
     try {
@@ -584,73 +623,54 @@ export function ReceiptApp() {
       opts: { approved?: boolean } = {},
     ) => {
       const approved = opts.approved ?? (source === "manual");
-      let updated: Receipt | undefined;
+      const now = Date.now();
       setReceipts((prev) =>
         prev.map((x) => {
           if (x.id !== id) return x;
-          updated = {
+          const updated: Receipt = {
             ...x,
             date: iso ?? undefined,
             dateRaw: raw ?? undefined,
             dateSource: source,
             approved,
             aiState: "done",
+            lastModified: now,
           };
+          dateCache.current[x.cacheKey] = {
+            iso,
+            raw,
+            source,
+            approved,
+          };
+          saveDateCache(dateCache.current);
+          pushUserAction("set-date", id, x.name, `${source}: ${raw || iso || "cleared"}`);
           return updated;
         }),
       );
-      const r = receipts.find((x) => x.id === id);
-      if (r) {
-        dateCache.current[r.cacheKey] = {
-          iso,
-          raw,
-          source,
-          aiDates: updated?.aiDates,
-          approved,
-        };
-        saveDateCache(dateCache.current);
-      }
     },
-    [receipts],
+    [pushUserAction],
   );
 
   const approveReceipt = useCallback((id: string) => {
+    const r = receipts.find((x) => x.id === id);
     setReceipts((prev) =>
       prev.map((x) => {
         if (x.id !== id) return x;
-        const next = { ...x, approved: true };
+        const next = { ...x, approved: true, lastModified: Date.now() };
         dateCache.current[x.cacheKey] = {
           iso: x.date ?? null,
           raw: x.dateRaw ?? null,
           source: x.dateSource,
-          aiDates: x.aiDates,
           approved: true,
         };
         saveDateCache(dateCache.current);
         return next;
       }),
     );
-  }, []);
-
-  const updateAiDates = useCallback(
-    (id: string, next: AIDateEntry[]) => {
-      setReceipts((prev) =>
-        prev.map((x) => {
-          if (x.id !== id) return x;
-          dateCache.current[x.cacheKey] = {
-            iso: x.date ?? null,
-            raw: x.dateRaw ?? null,
-            source: x.dateSource,
-            aiDates: next,
-            approved: x.approved ?? false,
-          };
-          saveDateCache(dateCache.current);
-          return { ...x, aiDates: next };
-        }),
-      );
-    },
-    [],
-  );
+    if (r) {
+      pushUserAction("approved", id, r.name);
+    }
+  }, [receipts, pushUserAction]);
 
   const refreshCredits = useCallback(
     async (silent = false) => {
@@ -731,9 +751,9 @@ export function ReceiptApp() {
                   date: cached.iso ?? undefined,
                   dateRaw: cached.raw ?? undefined,
                   dateSource: cached.source,
-                  aiDates: cached.aiDates,
                   approved: cached.approved,
                   aiState: "done",
+                  lastModified: Date.now(),
                 }
               : x,
           ),
@@ -759,72 +779,11 @@ export function ReceiptApp() {
           },
         );
         keyIndexRef.current = nextIndex;
-        const dates = result.dates ?? [];
-
-        // Multi-receipt image + split mode → replace this receipt with N slices,
-        // each pre-tagged with the corresponding detected date (unapproved).
-        if (dates.length > 1 && settings.splitMultiReceipt) {
-          try {
-            const parts = await splitImageVertically(r.file, dates.length);
-            const newReceipts: Receipt[] = [];
-            for (let i = 0; i < parts.length; i++) {
-              const f = parts[i];
-              const d = dates[i] ?? { iso: null, raw: null };
-              const ck = makeCacheKey(f);
-              newReceipts.push({
-                id: crypto.randomUUID(),
-                name: f.name,
-                cacheKey: ck,
-                originalSize: f.size,
-                file: f,
-                qualityOverride: null,
-                date: d.iso ?? undefined,
-                dateRaw: d.raw ?? undefined,
-                dateSource: "ai",
-                approved: false,
-                aiDates: [d],
-                aiState: "done",
-              });
-              dateCache.current[ck] = {
-                iso: d.iso,
-                raw: d.raw,
-                source: "ai",
-                aiDates: [d],
-                approved: false,
-              };
-            }
-            saveDateCache(dateCache.current);
-            setReceipts((prev) => {
-              const idx = prev.findIndex((x) => x.id === r.id);
-              if (idx < 0) return prev;
-              const next = [...prev];
-              next.splice(idx, 1, ...newReceipts);
-              return next;
-            });
-            pushLog({
-              level: "info",
-              source: `openrouter/key#${usedKeyIndex + 1}`,
-              message: `${r.name} → split into ${parts.length} (${dates.map((d) => d.raw ?? d.iso ?? "?").join(", ")})`,
-            });
-            toast.success(`${r.name}: split into ${parts.length} receipts`);
-            processed++;
-            setAiProgress((p) => ({ ...p, done: p.done + 1 }));
-            continue;
-          } catch (splitErr) {
-            pushLog({
-              level: "error",
-              source: "splitImage",
-              message: `${r.name}: ${(splitErr as Error).message}`,
-            });
-            // fall through to single-receipt handling below
-          }
-        }
 
         dateCache.current[r.cacheKey] = {
           iso: result.iso,
           raw: result.raw,
           source: "ai",
-          aiDates: dates,
           approved: false,
         };
         saveDateCache(dateCache.current);
@@ -836,27 +795,25 @@ export function ReceiptApp() {
                   date: result.iso ?? undefined,
                   dateRaw: result.raw ?? undefined,
                   dateSource: "ai",
-                  aiDates: dates,
                   approved: false,
                   aiState: "done",
+                  lastModified: Date.now(),
                 }
               : x,
           ),
         );
         processed++;
         pushLog({
+          category: "third-party",
           level: "info",
           source: `openrouter/key#${usedKeyIndex + 1}`,
-          message: `${r.name} → ${result.raw ?? "NONE"} (${result.iso ?? "—"})${dates.length > 1 ? ` [+${dates.length - 1} more]` : ""}`,
+          message: `${r.name} → ${result.raw ?? "NONE"} (${result.iso ?? "—"})`,
         });
-        if (dates.length > 1) {
-          toast.warning(
-            `${r.name}: detected ${dates.length} receipts — review in wizard`,
-          );
-        }
+        pushUserAction("ai-extract", r.id, r.name, result.raw || result.iso || "no date");
       } catch (e) {
         const msg = (e as Error).message;
         pushLog({
+          category: "third-party",
           level: "error",
           source: `openrouter/${model}`,
           message: `${r.name}: ${msg}`,
@@ -926,68 +883,10 @@ export function ReceiptApp() {
     if (!q.length) return;
     setWizardQueue(q);
     setWizardPos(focusId ? Math.max(0, q.indexOf(focusId)) : 0);
+    setWizardPendingDate(null);
     setWizardOpen(true);
   };
   const wizardReceipt = receipts.find((r) => r.id === wizardQueue[wizardPos]);
-
-  // Split a receipt into N slices (user-driven from the wizard).
-  const splitReceiptIntoParts = async (id: string, dates: AIDateEntry[]) => {
-    const r = receipts.find((x) => x.id === id);
-    if (!r || dates.length < 2) return;
-    try {
-      const parts = await splitImageVertically(r.file, dates.length);
-      const newReceipts: Receipt[] = parts.map((f, i) => {
-        const d = dates[i] ?? { iso: null, raw: null };
-        const ck = makeCacheKey(f);
-        dateCache.current[ck] = {
-          iso: d.iso,
-          raw: d.raw,
-          source: "ai",
-          aiDates: [d],
-          approved: false,
-        };
-        return {
-          id: crypto.randomUUID(),
-          name: f.name,
-          cacheKey: ck,
-          originalSize: f.size,
-          file: f,
-          qualityOverride: null,
-          date: d.iso ?? undefined,
-          dateRaw: d.raw ?? undefined,
-          dateSource: "ai",
-          approved: false,
-          aiDates: [d],
-          aiState: "done",
-        };
-      });
-      saveDateCache(dateCache.current);
-      setReceipts((prev) => {
-        const idx = prev.findIndex((x) => x.id === id);
-        if (idx < 0) return prev;
-        const next = [...prev];
-        next.splice(idx, 1, ...newReceipts);
-        return next;
-      });
-      // Rebuild wizard queue and jump to first new slice
-      const newIds = newReceipts.map((nr) => nr.id);
-      setWizardQueue((q) => {
-        const pos = q.indexOf(id);
-        if (pos < 0) return [...q, ...newIds];
-        const next = [...q];
-        next.splice(pos, 1, ...newIds);
-        return next;
-      });
-      toast.success(`Split into ${parts.length} receipts`);
-    } catch (e) {
-      toast.error(`Split failed: ${(e as Error).message}`);
-      pushLog({
-        level: "error",
-        source: "splitImage",
-        message: (e as Error).message,
-      });
-    }
-  };
 
   // Extract N cropped parts from an image using arbitrary user-drawn bboxes.
   const extractCroppedParts = async (
@@ -998,6 +897,7 @@ export function ReceiptApp() {
     const r = receipts.find((x) => x.id === id);
     if (!r || !boxes.length) return;
     try {
+      const now = Date.now();
       const files: File[] = [];
       for (let i = 0; i < boxes.length; i++) {
         files.push(await cropImageRegion(r.file, boxes[i], i + 1));
@@ -1012,6 +912,7 @@ export function ReceiptApp() {
           file: f,
           qualityOverride: null,
           aiState: "idle",
+          lastModified: now,
         };
       });
       setReceipts((prev) => {
@@ -1028,9 +929,11 @@ export function ReceiptApp() {
         }`,
       );
       setCropWizardOpen(false);
+      pushUserAction("crop-extract", id, r.name, `${boxes.length} parts`);
     } catch (e) {
       toast.error(`Crop failed: ${(e as Error).message}`);
       pushLog({
+        category: "client",
         level: "error",
         source: "cropImage",
         message: (e as Error).message,
@@ -1255,12 +1158,21 @@ export function ReceiptApp() {
                     <Button onClick={() => startWizard()} variant="secondary" size="sm" disabled={!receipts.length}>
                       <Wand2 className="mr-1.5 h-4 w-4" /> Review wizard
                     </Button>
+                    <select
+                      value={sortMode}
+                      onChange={(e) => setSortMode(e.target.value as SortMode)}
+                      className="h-8 rounded-md border bg-card px-2 text-xs"
+                      disabled={!receipts.length}
+                    >
+                      <option value="date">By Date</option>
+                      <option value="modified">By Modified</option>
+                    </select>
                     <Button
                       onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
                       variant="secondary"
                       size="sm"
                       disabled={!receipts.length}
-                      title="Flip sort direction (auto-sorted by date)"
+                      title="Flip sort direction"
                     >
                       <ArrowUpDown className="mr-1.5 h-4 w-4" /> {sortDir === "asc" ? "Asc" : "Desc"}
                     </Button>
@@ -1721,7 +1633,7 @@ export function ReceiptApp() {
                               className="ml-1 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] text-amber-600"
                               title="AI detection — open wizard to review/approve"
                             >
-                              {r.aiDates && r.aiDates.length > 1 ? `?×${r.aiDates.length}` : "?"}
+                              ?
                             </span>
                           )}
                           {r.aiState === "queued" && (
@@ -1756,85 +1668,113 @@ export function ReceiptApp() {
                   <AlertTriangle
                     className={`h-4 w-4 ${logs.some((l) => l.level === "error") ? "text-destructive" : "text-muted-foreground"}`}
                   />
-                  Errors & logs ({logs.length})
+                  Logs ({logs.length + userActionLogs.length})
                 </span>
               </AccordionTrigger>
               <AccordionContent>
-                <div className="flex justify-end gap-2">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      const text = logs
-                        .map(
-                          (l) =>
-                            `[${new Date(l.ts).toISOString()}] ${l.level.toUpperCase()} ${l.source}\n${l.message}${l.stack ? "\n" + l.stack : ""}`,
-                        )
-                        .join("\n\n");
-                      copyToClipboard(text);
-                    }}
-                    disabled={!logs.length}
-                  >
-                    <Copy className="mr-1 h-3 w-3" /> Copy all
-                  </Button>
-                  <Button size="sm" variant="ghost" onClick={() => setLogs([])} disabled={!logs.length}>
-                    <Trash2 className="mr-1 h-3 w-3" /> Clear
-                  </Button>
-                </div>
-                <div className="max-h-96 overflow-auto">
-                  {logs.length === 0 ? (
-                    <p className="px-2 py-3 text-xs text-muted-foreground">No errors.</p>
-                  ) : (
-                    <ul className="divide-y">
-                      {logs.map((l) => {
-                        const expanded = expandedLogId === l.id;
-                        const fullText = `[${new Date(l.ts).toISOString()}] ${l.level.toUpperCase()} ${l.source}\n${l.message}${l.stack ? "\n" + l.stack : ""}`;
-                        return (
-                          <li key={l.id} className="px-1 py-2 text-xs">
-                            <div className="flex items-baseline gap-2">
-                              <span
-                                className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase ${
-                                  l.level === "error"
-                                    ? "bg-destructive/15 text-destructive"
-                                    : l.level === "warn"
-                                      ? "bg-yellow-500/15 text-yellow-600"
-                                      : "bg-muted text-muted-foreground"
-                                }`}
-                              >
-                                {l.level}
-                              </span>
-                              <span className="font-mono text-[10px] text-muted-foreground">
-                                {new Date(l.ts).toLocaleTimeString()}
-                              </span>
-                              <span className="truncate font-mono text-[10px] text-muted-foreground">{l.source}</span>
-                              <button
-                                onClick={() => copyToClipboard(fullText)}
-                                className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-                                title="Copy"
-                              >
-                                <Copy className="h-3 w-3" />
-                              </button>
-                              {l.stack && (
-                                <button
-                                  onClick={() => setExpandedLogId(expanded ? null : l.id)}
-                                  className="rounded px-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
-                                >
-                                  {expanded ? "hide" : "stack"}
-                                </button>
+                <Tabs defaultValue="all" className="w-full">
+                  <TabsList className="mb-2 h-8">
+                    <TabsTrigger value="all" className="text-[11px]">All ({logs.length})</TabsTrigger>
+                    <TabsTrigger value="user" className="text-[11px]">User ({userActionLogs.length})</TabsTrigger>
+                    <TabsTrigger value="token" className="text-[11px]">Token</TabsTrigger>
+                    <TabsTrigger value="client" className="text-[11px]">Client</TabsTrigger>
+                    <TabsTrigger value="third-party" className="text-[11px]">3rd Party</TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent value="all" className="mt-0">
+                    <LogListView
+                      logs={logs}
+                      expandedLogId={expandedLogId}
+                      setExpandedLogId={setExpandedLogId}
+                      copyToClipboard={copyToClipboard}
+                      setLogs={setLogs}
+                    />
+                  </TabsContent>
+
+                  <TabsContent value="user" className="mt-0">
+                    <div className="flex justify-end gap-2 mb-2">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          const text = userActionLogs
+                            .map((l) => `[${new Date(l.ts).toISOString()}] ${l.action}: ${l.imageName}${l.details ? ` (${l.details})` : ""}`)
+                            .join("\n");
+                          copyToClipboard(text);
+                        }}
+                        disabled={!userActionLogs.length}
+                      >
+                        <Copy className="mr-1 h-3 w-3" /> Copy
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setUserActionLogs([])} disabled={!userActionLogs.length}>
+                        <Trash2 className="mr-1 h-3 w-3" /> Clear
+                      </Button>
+                    </div>
+                    <div className="max-h-80 overflow-auto">
+                      {userActionLogs.length === 0 ? (
+                        <p className="px-2 py-3 text-xs text-muted-foreground">No user actions yet.</p>
+                      ) : (
+                        <ul className="divide-y">
+                          {userActionLogs.map((l) => (
+                            <li key={l.id} className="px-1 py-2 text-xs">
+                              <div className="flex items-baseline gap-2">
+                                <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[10px] text-emerald-600">
+                                  {l.action}
+                                </span>
+                                <span className="font-mono text-[10px] text-muted-foreground">
+                                  {new Date(l.ts).toLocaleString()}
+                                </span>
+                              </div>
+                              <p className="mt-1 truncate font-mono text-[11px]">{l.imageName}</p>
+                              {l.details && (
+                                <p className="text-[10px] text-muted-foreground">{l.details}</p>
                               )}
-                            </div>
-                            <p className="mt-1 break-words font-mono text-[11px] whitespace-pre-wrap">{l.message}</p>
-                            {expanded && l.stack && (
-                              <pre className="mt-1 max-h-60 overflow-auto rounded bg-muted/40 p-2 font-mono text-[10px] whitespace-pre-wrap break-all">
-                                {l.stack}
-                              </pre>
-                            )}
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="token" className="mt-0">
+                    <div className="p-4 text-xs space-y-2">
+                      <p className="text-muted-foreground">OpenRouter Credits:</p>
+                      {credits ? (
+                        <div className="rounded border bg-muted/30 p-3 space-y-1">
+                          <p>Remaining: <span className="font-mono font-semibold text-primary">${credits.remaining.toFixed(4)}</span></p>
+                          <p>Total: <span className="font-mono">${credits.totalCredits.toFixed(2)}</span></p>
+                          <p>Used: <span className="font-mono">${credits.totalUsage.toFixed(4)}</span></p>
+                        </div>
+                      ) : (
+                        <p className="text-muted-foreground">Add an API key to see credits.</p>
+                      )}
+                      <Button size="sm" variant="outline" onClick={() => refreshCredits()} disabled={creditsLoading || !apiKeys.length}>
+                        {creditsLoading ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}
+                        Refresh
+                      </Button>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="client" className="mt-0">
+                    <LogListView
+                      logs={logs.filter((l) => l.category === "client")}
+                      expandedLogId={expandedLogId}
+                      setExpandedLogId={setExpandedLogId}
+                      copyToClipboard={copyToClipboard}
+                      setLogs={setLogs}
+                    />
+                  </TabsContent>
+
+                  <TabsContent value="third-party" className="mt-0">
+                    <LogListView
+                      logs={logs.filter((l) => l.category === "third-party")}
+                      expandedLogId={expandedLogId}
+                      setExpandedLogId={setExpandedLogId}
+                      copyToClipboard={copyToClipboard}
+                      setLogs={setLogs}
+                    />
+                  </TabsContent>
+                </Tabs>
               </AccordionContent>
             </AccordionItem>
           </Accordion>
@@ -2044,7 +1984,10 @@ export function ReceiptApp() {
 
 
       {/* Wizard */}
-      <Dialog open={wizardOpen} onOpenChange={setWizardOpen}>
+      <Dialog open={wizardOpen} onOpenChange={(open) => {
+        setWizardOpen(open);
+        if (!open) setWizardPendingDate(null);
+      }}>
         <DialogContent className="max-w-4xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -2058,61 +2001,135 @@ export function ReceiptApp() {
               key={wizardReceipt.id}
               receipt={wizardReceipt}
               years={years}
-              onChange={(iso, raw) => {
-                setReceiptDate(wizardReceipt.id, iso, raw, "manual", { approved: true });
+              pendingDate={wizardPendingDate}
+              onPendingChange={(iso, raw) => setWizardPendingDate({ iso, raw })}
+              onCommit={(iso, raw, source) => {
+                setReceiptDate(wizardReceipt.id, iso, raw, source, { approved: true });
+                setWizardPendingDate(null);
                 toast.success(iso ? `Saved date: ${raw || iso}` : "Date cleared");
               }}
+              onCancelPending={() => setWizardPendingDate(null)}
               onApprove={() => {
                 approveReceipt(wizardReceipt.id);
                 toast.success("Approved");
                 if (wizardPos < wizardQueue.length - 1) setWizardPos((i) => i + 1);
               }}
-              onPickDetected={(d) => {
-                setReceiptDate(wizardReceipt.id, d.iso, d.raw, "ai", { approved: true });
-                toast.success(`Picked: ${d.raw || d.iso || "?"}`);
-              }}
-              onSplit={() => {
-                if (wizardReceipt.aiDates && wizardReceipt.aiDates.length > 1) {
-                  splitReceiptIntoParts(wizardReceipt.id, wizardReceipt.aiDates);
+              onRunAI={async () => {
+                if (!apiKeys.length) {
+                  toast.error("Add at least one OpenRouter API key");
+                  return;
                 }
-              }}
-              onAddDate={(d) => {
-                const cur = wizardReceipt.aiDates ?? [];
-                updateAiDates(wizardReceipt.id, [...cur, d]);
-                toast.success(`Added detection: ${d.raw || d.iso}`);
-              }}
-              onRemoveDate={(idx) => {
-                const cur = wizardReceipt.aiDates ?? [];
-                const next = cur.filter((_, i) => i !== idx);
-                updateAiDates(wizardReceipt.id, next);
+                if (!wizardReceipt.compressed) {
+                  toast.error("Image still compressing");
+                  return;
+                }
+                setReceipts((prev) =>
+                  prev.map((x) => (x.id === wizardReceipt.id ? { ...x, aiState: "loading" } : x)),
+                );
+                try {
+                  const { result } = await extractDateRoundRobin(
+                    apiKeys,
+                    keyStateRef.current,
+                    keyIndexRef.current,
+                    wizardReceipt.compressed!.dataUrl,
+                    model,
+                    {
+                      minIntervalMs: settings.minKeyIntervalSec * 1000,
+                      cooldownAfterFailures: settings.cooldownAfterFailures,
+                      cooldownMs: settings.cooldownSec * 1000,
+                    },
+                  );
+                  setReceipts((prev) =>
+                    prev.map((x) =>
+                      x.id === wizardReceipt.id
+                        ? { ...x, aiState: "done" }
+                        : x,
+                    ),
+                  );
+                  if (result.iso || result.raw) {
+                    setWizardPendingDate({ iso: result.iso, raw: result.raw });
+                    pushLog({
+                      category: "third-party",
+                      level: "info",
+                      source: "openrouter",
+                      message: `${wizardReceipt.name} → ${result.raw ?? result.iso}`,
+                    });
+                    pushUserAction("ai-extract", wizardReceipt.id, wizardReceipt.name, result.raw || result.iso || "no date");
+                  } else {
+                    toast.info("No date detected");
+                  }
+                } catch (e) {
+                  setReceipts((prev) =>
+                    prev.map((x) => (x.id === wizardReceipt.id ? { ...x, aiState: "error" } : x)),
+                  );
+                  toast.error(`AI failed: ${(e as Error).message}`);
+                  pushLog({
+                    category: "third-party",
+                    level: "error",
+                    source: "openrouter",
+                    message: `${wizardReceipt.name}: ${(e as Error).message}`,
+                  });
+                }
               }}
               onClear={() => {
                 setReceipts((prev) =>
                   prev.map((x) =>
                     x.id === wizardReceipt.id
-                      ? { ...x, date: undefined, dateRaw: undefined, dateSource: undefined, approved: false, aiState: "idle" }
+                      ? { ...x, date: undefined, dateRaw: undefined, dateSource: undefined, approved: false, aiState: "idle", lastModified: Date.now() }
                       : x,
                   ),
                 );
                 delete dateCache.current[wizardReceipt.cacheKey];
                 saveDateCache(dateCache.current);
+                pushUserAction("clear-date", wizardReceipt.id, wizardReceipt.name);
+                setWizardPendingDate(null);
               }}
             />
           )}
           <div className="mt-4 flex items-center justify-between gap-2 border-t pt-3">
-            <Button variant="outline" size="sm" disabled={wizardPos === 0} onClick={() => setWizardPos((i) => Math.max(0, i - 1))}>
+            <Button variant="outline" size="sm" disabled={wizardPos === 0} onClick={() => {
+              setWizardPendingDate(null);
+              setWizardPos((i) => Math.max(0, i - 1));
+            }}>
               <ChevronLeft className="mr-1 h-4 w-4" /> Prev
             </Button>
-            <span className="text-xs text-muted-foreground">Changes auto-save</span>
-            <Button
-              size="sm"
-              onClick={() => {
-                if (wizardPos >= wizardQueue.length - 1) setWizardOpen(false);
-                else setWizardPos((i) => i + 1);
-              }}
-            >
-              {wizardPos >= wizardQueue.length - 1 ? "Done" : (<>Next <ChevronRight className="ml-1 h-4 w-4" /></>)}
-            </Button>
+            <span className="text-xs text-muted-foreground">
+              {wizardPendingDate ? "Review change before proceeding" : "Changes auto-save"}
+            </span>
+            {wizardPendingDate ? (
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setWizardPendingDate(null)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    const src = wizardReceipt.dateSource === "ai" ? "ai" : "manual";
+                    setReceiptDate(wizardReceipt.id, wizardPendingDate.iso, wizardPendingDate.raw, src, { approved: true });
+                    setWizardPendingDate(null);
+                    toast.success("Date saved");
+                    if (wizardPos >= wizardQueue.length - 1) setWizardOpen(false);
+                    else setWizardPos((i) => i + 1);
+                  }}
+                >
+                  <Check className="mr-1 h-3 w-3" /> Approve
+                </Button>
+              </div>
+            ) : (
+              <Button
+                size="sm"
+                onClick={() => {
+                  if (wizardPos >= wizardQueue.length - 1) setWizardOpen(false);
+                  else setWizardPos((i) => i + 1);
+                }}
+              >
+                {wizardPos >= wizardQueue.length - 1 ? "Done" : (<>Next <ChevronRight className="ml-1 h-4 w-4" /></>)}
+              </Button>
+            )}
           </div>
         </DialogContent>
       </Dialog>
@@ -2224,51 +2241,38 @@ export function ReceiptApp() {
 function WizardStep({
   receipt,
   years,
-  onChange,
-  onClear,
+  pendingDate,
+  onPendingChange,
+  onCommit,
+  onCancelPending,
   onApprove,
-  onPickDetected,
-  onSplit,
-  onAddDate,
-  onRemoveDate,
+  onRunAI,
+  onClear,
 }: {
   receipt: Receipt;
   years: number[];
-  onChange: (iso: string | null, raw: string | null) => void;
-  onClear: () => void;
+  pendingDate: { iso: string | null; raw: string | null } | null;
+  onPendingChange: (iso: string | null, raw: string | null) => void;
+  onCommit: (iso: string | null, raw: string | null, source: DateSource) => void;
+  onCancelPending: () => void;
   onApprove: () => void;
-  onPickDetected: (d: AIDateEntry) => void;
-  onSplit: () => void;
-  onAddDate: (d: AIDateEntry) => void;
-  onRemoveDate: (idx: number) => void;
+  onRunAI: () => void;
+  onClear: () => void;
 }) {
-  const [iso, setIso] = useState<string>(receipt.date ?? "");
-  const [raw, setRaw] = useState<string>(receipt.dateRaw ?? "");
+  const currentIso = pendingDate?.iso ?? receipt.date ?? "";
+  const currentRaw = pendingDate?.raw ?? receipt.dateRaw ?? "";
 
-  useEffect(() => {
-    setIso(receipt.date ?? "");
-    setRaw(receipt.dateRaw ?? "");
-  }, [receipt.id, receipt.date, receipt.dateRaw]);
-
-  const year = iso ? Number(iso.slice(0, 4)) : "";
-  const month = iso ? Number(iso.slice(5, 7)) : "";
-  const day = iso ? Number(iso.slice(8, 10)) : "";
-
-  // Auto-save on every change.
-  const commit = (newIso: string, newRaw: string) => {
-    setIso(newIso);
-    setRaw(newRaw);
-    onChange(newIso || null, newRaw || newIso || null);
-  };
+  const year = currentIso ? Number(currentIso.slice(0, 4)) : "";
+  const month = currentIso ? Number(currentIso.slice(5, 7)) : "";
+  const day = currentIso ? Number(currentIso.slice(8, 10)) : "";
 
   const setPart = (y: number | "", m: number | "", d: number | "") => {
     const yy = String(y || years[0] || new Date().getFullYear()).padStart(4, "0");
     const mm = String(m || 1).padStart(2, "0");
     const dd = String(d || 1).padStart(2, "0");
-    const next = `${yy}-${mm}-${dd}`;
-    // Default printed format: DD/MM/YY (matches receipt format)
-    const formattedRaw = `${dd}/${mm}/${yy.slice(2)}`;
-    commit(next, raw || formattedRaw);
+    const newIso = `${yy}-${mm}-${dd}`;
+    const newRaw = `${dd}/${mm}/${yy.slice(2)}`;
+    onPendingChange(newIso || null, currentRaw || newRaw);
   };
 
   return (
@@ -2280,131 +2284,211 @@ function WizardStep({
           <div className="flex h-40 items-center justify-center text-xs text-muted-foreground">Compressing…</div>
         )}
       </div>
-      <div className="space-y-3">
+      <div className="space-y-4">
         <p className="truncate font-mono text-xs text-muted-foreground">{receipt.name}</p>
-        {receipt.dateSource && (
-          <p className="text-xs">
-            Source:{" "}
-            <span className={receipt.dateSource === "ai" ? "text-primary" : "text-emerald-600"}>
-              {receipt.dateSource === "ai" ? "AI extracted" : "Manual"}
-            </span>
-            {receipt.dateSource === "ai" && (
-              receipt.approved ? (
-                <span className="ml-2 rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[10px] text-emerald-600">approved</span>
-              ) : (
-                <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] text-amber-600">needs approval</span>
-              )
+
+        {/* Final Date Section */}
+        <div className="rounded-md border bg-muted/30 p-3 space-y-2">
+          <Label className="text-xs font-semibold">Final Date</Label>
+
+          {/* Date Source Badge */}
+          {receipt.dateSource && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">Source:</span>
+              <span className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs ${
+                receipt.dateSource === "ai"
+                  ? "bg-primary/15 text-primary"
+                  : "bg-emerald-500/15 text-emerald-600"
+              }`}>
+                {receipt.dateSource === "ai" ? (
+                  <><Sparkles className="h-3 w-3" /> AI</>
+                ) : (
+                  <><Tag className="h-3 w-3" /> Manual</>
+                )}
+              </span>
+              {receipt.dateSource === "ai" && !receipt.approved && (
+                <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] text-amber-600">
+                  needs approval
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* AI Run Button */}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onRunAI}
+            disabled={receipt.aiState === "loading"}
+            className="w-full"
+          >
+            {receipt.aiState === "loading" ? (
+              <><Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> Extracting…</>
+            ) : (
+              <><Sparkles className="mr-1.5 h-3 w-3" /> Run AI Date Detection</>
             )}
-          </p>
-        )}
-        {(() => {
-          const list = receipt.aiDates ?? [];
-          const multi = list.length > 1;
-          return (
-            <div
-              className={`rounded-md border p-2 ${multi ? "border-amber-500/40 bg-amber-500/10" : "border-border bg-muted/30"}`}
-            >
-              <p className={`mb-2 text-xs font-semibold ${multi ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}>
-                {multi
-                  ? `⚠ AI detected ${list.length} receipts on this image`
-                  : `Detected dates (${list.length}) — add another if this image has more receipts`}
-              </p>
-              <div className="mb-2 flex flex-wrap gap-1">
-                {list.map((d, i) => {
-                  const active = (d.iso && d.iso === receipt.date) || (!d.iso && d.raw === receipt.dateRaw);
-                  return (
-                    <span key={i} className={`inline-flex items-center gap-1 rounded border pl-2 pr-1 py-0.5 font-mono text-[11px] ${active ? "bg-primary text-primary-foreground border-primary" : "bg-card"}`}>
-                      <button onClick={() => onPickDetected(d)} title="Use this date" className="hover:underline">
-                        {d.raw || d.iso || "?"}
-                      </button>
-                      <button
-                        onClick={() => onRemoveDate(i)}
-                        title="Remove this detection"
-                        className="ml-0.5 rounded px-1 text-[10px] opacity-70 hover:bg-destructive/20 hover:opacity-100"
-                      >
-                        ×
-                      </button>
-                    </span>
-                  );
-                })}
-                {list.length === 0 && (
-                  <span className="text-[11px] text-muted-foreground">No detections yet.</span>
-                )}
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    if (!iso && !raw) {
-                      toast.error("Set a date below first, then add it.");
-                      return;
-                    }
-                    onAddDate({ iso: iso || null, raw: raw || iso || null });
-                  }}
+          </Button>
+
+          {/* Date Dropdowns - Day, Month, Year order */}
+          <div className="space-y-1">
+            <div className="grid grid-cols-3 gap-2">
+              <div>
+                <Label className="text-[10px] text-muted-foreground">Day</Label>
+                <select
+                  className="h-9 w-full rounded-md border bg-card px-2 text-sm"
+                  value={day}
+                  onChange={(e) => setPart(year || years[0], month || 1, Number(e.target.value))}
                 >
-                  + Add current date as detection
-                </Button>
-                {multi && (
-                  <Button size="sm" variant="outline" onClick={onSplit}>
-                    Split image into {list.length} receipts
-                  </Button>
-                )}
+                  <option value="">Day</option>
+                  {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <Label className="text-[10px] text-muted-foreground">Month</Label>
+                <select
+                  className="h-9 w-full rounded-md border bg-card px-2 text-sm"
+                  value={month}
+                  onChange={(e) => setPart(year || years[0], Number(e.target.value), day || 1)}
+                >
+                  <option value="">Month</option>
+                  {MONTHS.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+                </select>
+              </div>
+              <div>
+                <Label className="text-[10px] text-muted-foreground">Year</Label>
+                <select
+                  className="h-9 w-full rounded-md border bg-card px-2 text-sm"
+                  value={year}
+                  onChange={(e) => setPart(Number(e.target.value), month || 1, day || 1)}
+                >
+                  <option value="">Year</option>
+                  {years.map((y) => <option key={y} value={y}>{y}</option>)}
+                </select>
               </div>
             </div>
-          );
-        })()}
-        <div className="space-y-1">
-          <Label className="text-xs">Date as printed on receipt</Label>
-          <Input
-            value={raw}
-            onChange={(e) => commit(iso, e.target.value)}
-            placeholder="e.g. 03/11/2024 or Nov 3 2024"
-          />
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs">Date for sorting (ISO)</Label>
-          <div className="grid grid-cols-3 gap-2">
-            <select
-              className="h-9 rounded-md border bg-card px-2 text-sm"
-              value={year}
-              onChange={(e) => setPart(Number(e.target.value), month || 1, day || 1)}
-            >
-              <option value="">Year</option>
-              {years.map((y) => <option key={y} value={y}>{y}</option>)}
-            </select>
-            <select
-              className="h-9 rounded-md border bg-card px-2 text-sm"
-              value={month}
-              onChange={(e) => setPart(year || years[0], Number(e.target.value), day || 1)}
-            >
-              <option value="">Month</option>
-              {MONTHS.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
-            </select>
-            <select
-              className="h-9 rounded-md border bg-card px-2 text-sm"
-              value={day}
-              onChange={(e) => setPart(year || years[0], month || 1, Number(e.target.value))}
-            >
-              <option value="">Day</option>
-              {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
-                <option key={d} value={d}>{d}</option>
-              ))}
-            </select>
+            <p className="font-mono text-[11px] text-muted-foreground">ISO: {currentIso || "—"}</p>
           </div>
-          <p className="font-mono text-[11px] text-muted-foreground">{iso || "—"}</p>
-        </div>
-        <div className="flex flex-wrap gap-2 border-t pt-2">
-          {receipt.date && !receipt.approved && (
-            <Button size="sm" onClick={onApprove}>
-              <Check className="mr-1 h-3 w-3" /> Approve
-            </Button>
+
+          {/* Pending change indicator */}
+          {pendingDate && (
+            <div className="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
+              <p className="font-medium text-amber-700 dark:text-amber-400">Pending change: {pendingDate.raw || pendingDate.iso || "no date"}</p>
+              <p className="text-muted-foreground mt-1">Approve or cancel before navigating</p>
+            </div>
           )}
-          {receipt.date && (
-            <Button size="sm" variant="ghost" onClick={onClear}>Clear date</Button>
-          )}
+
+          {/* Action buttons */}
+          <div className="flex flex-wrap gap-2 pt-2 border-t">
+            {receipt.date && !receipt.approved && !pendingDate && (
+              <Button size="sm" onClick={onApprove}>
+                <Check className="mr-1 h-3 w-3" /> Approve
+              </Button>
+            )}
+            {receipt.date && !pendingDate && (
+              <Button size="sm" variant="ghost" onClick={onClear}>Clear date</Button>
+            )}
+          </div>
         </div>
       </div>
     </div>
+  );
+}
+
+function LogListView({
+  logs,
+  expandedLogId,
+  setExpandedLogId,
+  copyToClipboard,
+  setLogs,
+}: {
+  logs: LogEntry[];
+  expandedLogId: string | null;
+  setExpandedLogId: (id: string | null) => void;
+  copyToClipboard: (text: string) => void;
+  setLogs: React.Dispatch<React.SetStateAction<LogEntry[]>>;
+}) {
+  return (
+    <>
+      <div className="flex justify-end gap-2">
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            const text = logs
+              .map(
+                (l) =>
+                  `[${new Date(l.ts).toISOString()}] ${l.level.toUpperCase()} [${l.category}] ${l.source}\n${l.message}${l.stack ? "\n" + l.stack : ""}`,
+              )
+              .join("\n\n");
+            copyToClipboard(text);
+          }}
+          disabled={!logs.length}
+        >
+          <Copy className="mr-1 h-3 w-3" /> Copy
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setLogs([])} disabled={!logs.length}>
+          <Trash2 className="mr-1 h-3 w-3" /> Clear
+        </Button>
+      </div>
+      <div className="max-h-80 overflow-auto">
+        {logs.length === 0 ? (
+          <p className="px-2 py-3 text-xs text-muted-foreground">No logs.</p>
+        ) : (
+          <ul className="divide-y">
+            {logs.map((l) => {
+              const expanded = expandedLogId === l.id;
+              const fullText = `[${new Date(l.ts).toISOString()}] ${l.level.toUpperCase()} [${l.category}] ${l.source}\n${l.message}${l.stack ? "\n" + l.stack : ""}`;
+              return (
+                <li key={l.id} className="px-1 py-2 text-xs">
+                  <div className="flex items-baseline gap-2">
+                    <span
+                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase ${
+                        l.level === "error"
+                          ? "bg-destructive/15 text-destructive"
+                          : l.level === "warn"
+                            ? "bg-yellow-500/15 text-yellow-600"
+                            : "bg-muted text-muted-foreground"
+                      }`}
+                    >
+                      {l.level}
+                    </span>
+                    <span className="rounded bg-muted px-1 py-0.5 font-mono text-[10px] text-muted-foreground">
+                      {l.category}
+                    </span>
+                    <span className="font-mono text-[10px] text-muted-foreground">
+                      {new Date(l.ts).toLocaleString()}
+                    </span>
+                    <span className="truncate font-mono text-[10px] text-muted-foreground">{l.source}</span>
+                    <button
+                      onClick={() => copyToClipboard(fullText)}
+                      className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                      title="Copy"
+                    >
+                      <Copy className="h-3 w-3" />
+                    </button>
+                    {l.stack && (
+                      <button
+                        onClick={() => setExpandedLogId(expanded ? null : l.id)}
+                        className="rounded px-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
+                      >
+                        {expanded ? "hide" : "stack"}
+                      </button>
+                    )}
+                  </div>
+                  <p className="mt-1 break-words font-mono text-[11px] whitespace-pre-wrap">{l.message}</p>
+                  {expanded && l.stack && (
+                    <pre className="mt-1 max-h-60 overflow-auto rounded bg-muted/40 p-2 font-mono text-[10px] whitespace-pre-wrap break-all">
+                      {l.stack}
+                    </pre>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </>
   );
 }
