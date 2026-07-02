@@ -143,6 +143,8 @@ type SectionKey =
 
 type SortMode = "date" | "modified";
 
+type AIProvider = "openrouter" | "gemini" | "auto";
+
 type Settings = {
   minKeyIntervalSec: number;
   maxPdfSizeMB: number;
@@ -155,7 +157,11 @@ type Settings = {
   cooldownSec: number;
   autoSaveEnabled: boolean;
   autoSaveIntervalSec: number;
+  splitMultiReceipt: boolean;
   visibleSections: Record<SectionKey, boolean>;
+  aiProvider: AIProvider;
+  geminiApiKey: string;
+  geminiModel: string;
 };
 const DEFAULT_SETTINGS: Settings = {
   minKeyIntervalSec: 0,
@@ -169,6 +175,7 @@ const DEFAULT_SETTINGS: Settings = {
   cooldownSec: 65,
   autoSaveEnabled: false,
   autoSaveIntervalSec: 60,
+  splitMultiReceipt: false,
   visibleSections: {
     actions: true,
     quality: true,
@@ -177,6 +184,9 @@ const DEFAULT_SETTINGS: Settings = {
     years: true,
     "report-opts": true,
   },
+  aiProvider: "auto",
+  geminiApiKey: "",
+  geminiModel: "gemini-2.0-flash",
 };
 
 function loadSettings(): Settings {
