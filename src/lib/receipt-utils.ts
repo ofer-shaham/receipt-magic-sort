@@ -280,7 +280,7 @@ export class InsufficientCreditsError extends Error {
 }
 
 export const RECEIPT_PROMPT =
-  'Receipt photo. Find the top-most date (day/month/year order). Reply JSON only: {"iso":"YYYY-MM-DD"} or NONE.';
+  'Receipt photo with date on 3rd line: (day/month/year order). Reply JSON only: {"iso":"YYYY-MM-DD"} or NONE.';
 
 export function parseReceiptDatesText(txt: string): AIDateResult {
   const trimmed = (txt ?? "").trim();
