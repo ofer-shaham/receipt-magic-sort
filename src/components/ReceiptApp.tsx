@@ -46,7 +46,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { Upload, Download, Sparkles, ArrowUpDown, X, Loader as Loader2, FileText, KeyRound, TriangleAlert as AlertTriangle, ExternalLink, Trash2, RefreshCw, Tag, Archive, Wand as Wand2, ChevronLeft, ChevronRight, Plus, Sun, Moon, Droplet, FileDown, Upload as UploadIcon, Table as TableIcon, Maximize2, Check, Settings as SettingsIcon, EyeOff, Copy, Clock, Lightbulb, ClipboardList, RotateCw } from "lucide-react";
+import { Upload, Download, Sparkles, ArrowUpDown, X, Loader as Loader2, FileText, KeyRound, TriangleAlert as AlertTriangle, ExternalLink, Trash2, RefreshCw, Tag, Archive, Wand as Wand2, ChevronLeft, ChevronRight, Plus, Sun, Moon, Droplet, FileDown, Upload as UploadIcon, Table as TableIcon, Maximize2, Check, Settings as SettingsIcon, EyeOff, Copy, Clock, Lightbulb, ClipboardList, RotateCw, Scissors, Eye } from "lucide-react";
 
 
 type DateSource = "ai" | "manual";
