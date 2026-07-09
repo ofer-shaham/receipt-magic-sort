@@ -2652,6 +2652,207 @@ export function ReceiptApp() {
         </DialogContent>
       </Dialog>
 
+      {/* Recommendation dialog */}
+      <Dialog open={recommendOpen} onOpenChange={setRecommendOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Lightbulb className="h-4 w-4 text-primary" /> Model recommendation
+            </DialogTitle>
+          </DialogHeader>
+          {!recommendation || recommendation.loading ? (
+            <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Querying OpenRouter…
+            </div>
+          ) : (
+            <div className="space-y-3 text-sm">
+              <div className="rounded-md border p-3">
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                    Best OpenRouter free model
+                  </span>
+                  {recommendation.openrouter && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setModel(recommendation.openrouter!.model);
+                        localStorage.setItem(MODEL_STORAGE, recommendation.openrouter!.model);
+                        setSettings((s) => ({ ...s, aiProvider: "openrouter" }));
+                        toast.success("Applied OpenRouter model");
+                      }}
+                    >
+                      Apply
+                    </Button>
+                  )}
+                </div>
+                <p className="font-mono text-xs">
+                  {recommendation.openrouter?.model ?? "—"}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {recommendation.openrouter?.note ?? "No free models available."}
+                </p>
+              </div>
+
+              <div className="rounded-md border p-3">
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                    Best Gemini direct model
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setSettings((s) => ({
+                        ...s,
+                        aiProvider: "gemini",
+                        geminiModel: recommendation.gemini.model,
+                      }));
+                      toast.success("Applied Gemini model");
+                    }}
+                  >
+                    Apply
+                  </Button>
+                </div>
+                <p className="font-mono text-xs">{recommendation.gemini.model}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {recommendation.gemini.note}
+                </p>
+              </div>
+
+              <div className="rounded-md bg-muted/40 p-3 text-xs">
+                <p className="font-semibold">Comparison</p>
+                <p className="mt-1 text-muted-foreground">{recommendation.compare}</p>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Analysis report dialog */}
+      <Dialog open={analysisOpen} onOpenChange={setAnalysisOpen}>
+        <DialogContent className="max-w-5xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ClipboardList className="h-4 w-4 text-primary" />
+              AI analysis report ({analysisEntries.length} calls this session)
+            </DialogTitle>
+          </DialogHeader>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+            <span>
+              Total cost:{" "}
+              <span className="font-mono font-semibold text-primary">
+                ${analysisEntries.reduce((s, a) => s + (a.costUsd ?? 0), 0).toFixed(6)}
+              </span>{" "}
+              · Total tokens:{" "}
+              <span className="font-mono">
+                {analysisEntries.reduce((s, a) => s + (a.totalTokens ?? 0), 0)}
+              </span>
+            </span>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setAnalysisEntries([])}
+              disabled={!analysisEntries.length}
+            >
+              <Trash2 className="mr-1 h-3 w-3" /> Clear
+            </Button>
+          </div>
+          <div className="max-h-[65vh] overflow-auto rounded-md border">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-muted/60 backdrop-blur">
+                <tr>
+                  <th className="px-2 py-1 text-left">When</th>
+                  <th className="px-2 py-1 text-left">Image</th>
+                  <th className="px-2 py-1 text-left">Provider · Model</th>
+                  <th className="px-2 py-1 text-right">Tokens</th>
+                  <th className="px-2 py-1 text-right">Cost</th>
+                  <th className="px-2 py-1 text-right">Certainty</th>
+                  <th className="px-2 py-1 text-left">Date</th>
+                  <th className="px-2 py-1"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {analysisEntries.map((a) => {
+                  const stillExists = receipts.some((r) => r.id === a.imageId);
+                  return (
+                    <tr key={a.id} className="border-t">
+                      <td className="px-2 py-1 whitespace-nowrap font-mono text-[10px] text-muted-foreground">
+                        {new Date(a.ts).toLocaleTimeString()}
+                      </td>
+                      <td className="px-2 py-1 max-w-[220px] truncate font-mono" title={a.imageName}>
+                        {a.imageName}
+                      </td>
+                      <td className="px-2 py-1 font-mono text-[10px]">
+                        <span className="rounded bg-primary/10 px-1 py-0.5 text-primary">
+                          {a.provider}
+                        </span>{" "}
+                        {a.model}
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {a.totalTokens ?? "—"}
+                        {a.promptTokens != null && a.completionTokens != null && (
+                          <span className="ml-1 text-muted-foreground">
+                            ({a.promptTokens}/{a.completionTokens})
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {a.costUsd != null ? `$${a.costUsd.toFixed(6)}` : "—"}
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        <span
+                          className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                            a.certainty >= 0.7
+                              ? "bg-emerald-500/15 text-emerald-600"
+                              : a.certainty >= 0.4
+                                ? "bg-amber-500/15 text-amber-600"
+                                : "bg-destructive/15 text-destructive"
+                          }`}
+                        >
+                          {Math.round(a.certainty * 100)}%
+                        </span>
+                      </td>
+                      <td className="px-2 py-1 font-mono">
+                        {a.error ? (
+                          <span className="text-destructive">err: {a.error.slice(0, 40)}</span>
+                        ) : (
+                          a.raw || a.iso || "—"
+                        )}
+                        {a.datesCount > 1 && (
+                          <span className="ml-1 text-amber-600">×{a.datesCount}</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          disabled={!stillExists}
+                          title={stillExists ? "Open image preview" : "Image no longer in session"}
+                          onClick={() => {
+                            setImagePreviewId(a.imageId);
+                            setAnalysisOpen(false);
+                          }}
+                        >
+                          <Eye className="h-3 w-3" />
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {analysisEntries.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="px-2 py-6 text-center text-muted-foreground">
+                      No AI calls yet this session.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Controls visibility settings */}
       <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}>
         <DialogContent className="max-w-md">
