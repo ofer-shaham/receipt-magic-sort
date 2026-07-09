@@ -2322,6 +2322,10 @@ export function ReceiptApp() {
         onOpenChange={(o) => !o && setImagePreviewId(null)}
         src={previewImage?.compressed?.dataUrl ?? null}
         name={previewImage?.name ?? ""}
+        rotation={previewImage?.rotation ?? 0}
+        onRotationChange={(deg) => {
+          if (previewImage) setReceiptRotation(previewImage.id, deg);
+        }}
         onOpenCropWizard={
           previewImage
             ? () => {
@@ -2338,7 +2342,33 @@ export function ReceiptApp() {
         open={cropWizardOpen}
         onOpenChange={(o) => {
           setCropWizardOpen(o);
-          if (!o) setCropWizardId(null);
+          if (!o) {
+            const closedId = cropWizardId;
+            setCropWizardId(null);
+            // Multi-receipt queue: advance to next remaining multi-receipt image.
+            if (multiQueueOpen) {
+              const remaining = multiReceiptImages.filter(
+                (r) => r.id !== closedId,
+              );
+              if (remaining.length) {
+                setTimeout(() => {
+                  setCropWizardId(remaining[0].id);
+                  setCropWizardOpen(true);
+                }, 100);
+              } else {
+                setMultiQueueOpen(false);
+                toast.success(
+                  "Multi-receipt queue complete — you can now export a fresh archive.",
+                  {
+                    action: {
+                      label: "Export ZIP",
+                      onClick: () => downloadRenamedArchive(),
+                    },
+                  },
+                );
+              }
+            }
+          }
         }}
         imageSrc={cropTarget?.compressed?.dataUrl ?? null}
         imageName={cropTarget?.name ?? ""}
