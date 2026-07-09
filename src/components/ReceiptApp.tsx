@@ -1046,6 +1046,103 @@ export function ReceiptApp() {
 
   const previewImage = receipts.find((r) => r.id === imagePreviewId);
 
+  // Images whose AI detection returned multiple receipts.
+  const multiReceiptImages = useMemo(
+    () => sortedReceipts.filter((r) => (r.aiDates?.length ?? 0) > 1),
+    [sortedReceipts],
+  );
+  const unapprovedAI = useMemo(
+    () =>
+      sortedReceipts.filter(
+        (r) => r.date && r.dateSource === "ai" && !r.approved,
+      ),
+    [sortedReceipts],
+  );
+
+  // Start the wizard filtered to unapproved AI detections only.
+  const startApprovalWizard = () => {
+    const q = unapprovedAI.map((r) => r.id);
+    if (!q.length) {
+      toast.info("Nothing to approve — all AI dates already approved");
+      return;
+    }
+    setWizardQueue(q);
+    setWizardPos(0);
+    setWizardPendingDate(null);
+    setWizardOpen(true);
+  };
+
+  // Multi-receipt queue: opens the crop wizard on the first multi-receipt
+  // image, then advances via the wizard's dialog onOpenChange handler below.
+  const startMultiReceiptQueue = () => {
+    if (!multiReceiptImages.length) return;
+    setMultiQueueOpen(true);
+    setCropWizardId(multiReceiptImages[0].id);
+    setCropWizardOpen(true);
+  };
+
+  const buildRecommendation = async () => {
+    setRecommendOpen(true);
+    setRecommendation({
+      openrouter: null,
+      gemini: { model: "gemini-2.5-flash-lite", note: "" },
+      compare: "",
+      loading: true,
+    });
+    try {
+      const [freeList, cr] = await Promise.all([
+        fetchFreeVisionModelsList().catch(() => [] as string[]),
+        apiKeys[0]
+          ? fetchOpenRouterCredits(apiKeys[0]).catch(() => null)
+          : Promise.resolve(null),
+      ]);
+      // Prefer Gemini vision on free tier when available.
+      const preferOrder = [
+        "google/gemini-2.0-flash-exp:free",
+        "google/gemini-2.5-flash-image:free",
+        "qwen/qwen2.5-vl-72b-instruct:free",
+        "meta-llama/llama-3.2-11b-vision-instruct:free",
+      ];
+      const orModel =
+        preferOrder.find((m) => freeList.includes(m)) ??
+        freeList[0] ??
+        FREE_VISION_MODELS[0];
+      const orNote = freeList.length
+        ? `Picked from ${freeList.length} vision-capable free models. Rate-limited by OpenRouter (~10/min per key, ~200/day).`
+        : "Free model list unavailable — using built-in fallback.";
+      const remaining = cr?.remaining ?? 0;
+      // Direct Gemini choice.
+      const geminiModel =
+        remaining < 0.01 && !settings.geminiApiKey.trim()
+          ? "gemini-2.5-flash-lite"
+          : "gemini-2.5-flash-lite";
+      const geminiNote =
+        "Cheapest Gemini vision model (~$0.10/1M in, $0.40/1M out). ~1.4K in + 80 out per receipt = ~$0.00018/req → ~5,500 req/$1. Bypasses OpenRouter rate limits.";
+      let compare = "";
+      if (
+        orModel.startsWith("google/gemini") &&
+        geminiModel.startsWith("gemini")
+      ) {
+        compare =
+          "Same underlying family (Google Gemini vision). The free OpenRouter route is $0 but rate-limited; the direct Gemini API costs ~$0.0002/receipt with no free-tier daily cap and higher throughput.";
+      } else {
+        compare =
+          "Different providers. OpenRouter free route saves money but rate-limits daily; Gemini direct is paid but faster and unlimited.";
+      }
+      setRecommendation({
+        openrouter: { model: orModel, note: orNote },
+        gemini: { model: geminiModel, note: geminiNote },
+        compare,
+        loading: false,
+      });
+    } catch (e) {
+      toast.error(`Recommendation failed: ${(e as Error).message}`);
+      setRecommendation((r) => (r ? { ...r, loading: false } : r));
+    }
+  };
+
+
+
   const buildWizardQueue = () => {
     // Priority: untagged → AI-tagged-but-unapproved → approved/manual
     const untagged = receipts.filter((r) => !r.date).map((r) => r.id);
