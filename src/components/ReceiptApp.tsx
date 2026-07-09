@@ -281,6 +281,22 @@ export function ReceiptApp() {
   const [cropWizardId, setCropWizardId] = useState<string | null>(null);
   const [pdfsStale, setPdfsStale] = useState(false);
 
+  // Session-only analysis report (never persisted).
+  const [analysisEntries, setAnalysisEntries] = useState<AnalysisEntry[]>([]);
+  const [analysisOpen, setAnalysisOpen] = useState(false);
+
+  // Recommendation dialog state
+  const [recommendOpen, setRecommendOpen] = useState(false);
+  const [recommendation, setRecommendation] = useState<null | {
+    openrouter: { model: string; note: string } | null;
+    gemini: { model: string; note: string };
+    compare: string;
+    loading: boolean;
+  }>(null);
+
+  // Multi-receipt handling queue (images whose AI returned 2+ dates).
+  const [multiQueueOpen, setMultiQueueOpen] = useState(false);
+
   const dateCache = useRef<Record<string, CachedDate>>(loadDateCache());
   const keyIndexRef = useRef(0);
   const keyStateRef = useRef<Record<string, KeyStatus>>({});
