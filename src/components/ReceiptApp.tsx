@@ -117,7 +117,29 @@ type CachedDate = {
   raw: string | null;
   source?: DateSource;
   approved?: boolean;
+  rotation?: number;
 };
+
+// Session-only record of every AI extraction call.
+export type AnalysisEntry = {
+  id: string;
+  ts: number;
+  imageId: string;
+  imageName: string;
+  provider: "openrouter" | "gemini";
+  model: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+  latencyMs: number;
+  certainty: number;
+  iso: string | null;
+  raw: string | null;
+  datesCount: number;
+  error?: string;
+};
+
 
 const MONTHS = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
