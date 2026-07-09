@@ -792,7 +792,7 @@ export function ReceiptApp() {
         const useGemini =
           provider === "gemini" ||
           (provider === "auto" && !hasOR && hasGemini);
-        let result: AIDateResult;
+        let result: AIDateResultWithMeta;
         let sourceLabel = "gemini";
         if (useGemini) {
           if (!hasGemini) throw new Error("Gemini API key is not set");
@@ -2137,7 +2137,7 @@ export function ReceiptApp() {
                   prev.map((x) => (x.id === wizardReceipt.id ? { ...x, aiState: "loading" } : x)),
                 );
                 try {
-                  let result: AIDateResult;
+                  let result: AIDateResultWithMeta;
                   let sourceLabel = "gemini";
                   if (useGemini) {
                     result = await extractDateWithGemini(
