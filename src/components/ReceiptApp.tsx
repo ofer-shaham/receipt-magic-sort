@@ -2298,7 +2298,7 @@ export function ReceiptApp() {
                         </button>
                       </div>
                       {r.compressed ? (
-                        <img src={r.compressed.dataUrl} alt={`Page ${i + 1}`} className="block w-full" />
+                        <img src={r.compressed.dataUrl} alt={`Page ${i + 1}`} className="block w-full" style={{ transform: r.rotation ? `rotate(${r.rotation}deg)` : undefined }} />
                       ) : (
                         <div className="flex h-32 items-center justify-center text-xs text-muted-foreground">
                           <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Compressing…
