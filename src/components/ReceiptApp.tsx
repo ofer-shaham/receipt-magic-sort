@@ -1185,17 +1185,27 @@ export function ReceiptApp() {
     if (!sortedReceipts.length) return;
     const items: { blob: Blob; name: string }[] = [];
     for (const r of sortedReceipts) {
-      const blob: Blob = r.compressed?.blob ?? r.file;
-      const ext = (r.name.match(/\.([a-z0-9]+)$/i)?.[1] || "jpg").toLowerCase();
+      const rot = ((r.rotation ?? 0) % 360 + 360) % 360;
+      const srcBlob: Blob = r.compressed?.blob ?? r.file;
+      let outBlob: Blob = srcBlob;
+      let ext = (r.name.match(/\.([a-z0-9]+)$/i)?.[1] || "jpg").toLowerCase();
+      if (rot !== 0) {
+        const rotated = await rotateImageBlob(srcBlob, rot);
+        outBlob = rotated.blob;
+        ext = "jpg";
+      }
+      const rawBase = safeSlug(r.name.replace(/\.[^.]+$/, ""));
+      const rotSuffix = rot !== 0 ? "_rotated" : "";
       const base = r.date
-        ? `${r.date}_${safeSlug(r.name.replace(/\.[^.]+$/, ""))}`
-        : `undated_${safeSlug(r.name.replace(/\.[^.]+$/, ""))}`;
-      items.push({ blob, name: `${base}.${ext}` });
+        ? `${r.date}_${rawBase}${rotSuffix}`
+        : `undated_${rawBase}${rotSuffix}`;
+      items.push({ blob: outBlob, name: `${base}.${ext}` });
     }
     toast.info("Building archive…");
     const zip = await buildRenamedArchive(items);
     triggerDownload(zip, `receipts-renamed-${stamp()}.zip`);
   };
+
 
   // Year×Month matrix data
   const matrix = useMemo(() => {
