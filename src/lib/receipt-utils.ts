@@ -330,11 +330,42 @@ function dataUrlToBase64(dataUrl: string): { mime: string; b64: string } {
   return { mime: m[1], b64: m[2] };
 }
 
+export type AICallMeta = {
+  provider: "openrouter" | "gemini";
+  model: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+  latencyMs: number;
+  rawText: string;
+};
+
+export type AIDateResultWithMeta = AIDateResult & { meta: AICallMeta };
+
+// Rough certainty heuristic (0..1) for a date result.
+export function estimateCertainty(r: AIDateResult): number {
+  if (!r.dates?.length && !r.iso && !r.raw) return 0;
+  const first = r.dates?.[0];
+  const isoOk = !!(first?.iso || r.iso);
+  const rawOk = !!(first?.raw || r.raw);
+  const dmyOk = rawOk && /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/.test(first?.raw || r.raw || "");
+  const bboxOk = !!first?.bbox;
+  let score = 0;
+  if (isoOk) score += 0.5;
+  if (dmyOk) score += 0.3;
+  else if (rawOk) score += 0.15;
+  if (bboxOk) score += 0.1;
+  if ((r.dates?.length ?? 0) >= 1) score += 0.1;
+  return Math.min(1, score);
+}
+
 export async function extractDateWithGemini(
   apiKey: string,
   dataUrl: string,
   model = "gemini-2.0-flash",
-): Promise<AIDateResult> {
+): Promise<AIDateResultWithMeta> {
+  const t0 = performance.now();
   const img = await loadImage(dataUrl);
   const canvas = document.createElement("canvas");
   canvas.width = img.width;
@@ -369,16 +400,32 @@ export async function extractDateWithGemini(
   }
   const parts = json?.candidates?.[0]?.content?.parts ?? [];
   const txt = parts.map((p: any) => p?.text ?? "").join("").trim();
-  return parseReceiptDatesText(txt);
+  const parsed = parseReceiptDatesText(txt);
+  const usage = json?.usageMetadata ?? {};
+  const promptTokens = Number(usage.promptTokenCount ?? 0) || undefined;
+  const completionTokens = Number(usage.candidatesTokenCount ?? 0) || undefined;
+  return {
+    ...parsed,
+    meta: {
+      provider: "gemini",
+      model,
+      promptTokens,
+      completionTokens,
+      totalTokens: Number(usage.totalTokenCount ?? 0) || undefined,
+      costUsd: undefined,
+      latencyMs: Math.round(performance.now() - t0),
+      rawText: txt,
+    },
+  };
 }
 
 export async function extractDateWithAI(
   apiKey: string,
   dataUrl: string,
   model: string,
-): Promise<AIDateResult> {
+): Promise<AIDateResultWithMeta> {
+  const t0 = performance.now();
   const img = await loadImage(dataUrl);
-  // Use full image — multiple receipts may appear anywhere in the frame.
   const canvas = document.createElement("canvas");
   canvas.width = img.width;
   canvas.height = img.height;
@@ -394,6 +441,7 @@ export async function extractDateWithAI(
     },
     body: JSON.stringify({
       model,
+      usage: { include: true },
       messages: [
         {
           role: "user",
@@ -416,7 +464,53 @@ export async function extractDateWithAI(
     throw new Error(`OpenRouter: ${msg}`);
   }
   const txt: string = (json.choices?.[0]?.message?.content ?? "").trim();
-  return parseReceiptDatesText(txt);
+  const parsed = parseReceiptDatesText(txt);
+  const usage = json?.usage ?? {};
+  return {
+    ...parsed,
+    meta: {
+      provider: "openrouter",
+      model,
+      promptTokens: Number(usage.prompt_tokens ?? 0) || undefined,
+      completionTokens: Number(usage.completion_tokens ?? 0) || undefined,
+      totalTokens: Number(usage.total_tokens ?? 0) || undefined,
+      costUsd: typeof usage.cost === "number" ? usage.cost : undefined,
+      latencyMs: Math.round(performance.now() - t0),
+      rawText: txt,
+    },
+  };
+}
+
+// Rotate an image (Blob or File) by 0/90/180/270 degrees, returning a JPEG
+// blob with matching (possibly swapped) width/height.
+export async function rotateImageBlob(
+  input: Blob,
+  degrees: number,
+  quality = 0.92,
+): Promise<{ blob: Blob; width: number; height: number }> {
+  const norm = ((degrees % 360) + 360) % 360;
+  const url = URL.createObjectURL(input);
+  try {
+    const img = await loadImage(url);
+    const swap = norm === 90 || norm === 270;
+    const w = swap ? img.height : img.width;
+    const h = swap ? img.width : img.height;
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d")!;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, w, h);
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate((norm * Math.PI) / 180);
+    ctx.drawImage(img, -img.width / 2, -img.height / 2);
+    const blob: Blob = await new Promise((res) =>
+      canvas.toBlob((b) => res(b!), "image/jpeg", quality),
+    );
+    return { blob, width: w, height: h };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 // Split a single image into N horizontal slices (top-to-bottom) for the
