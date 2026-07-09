@@ -70,14 +70,16 @@ type Receipt = {
   date?: string | null;
   dateRaw?: string | null;
   dateSource?: DateSource;
-  // User has confirmed the displayed date is correct.
   approved?: boolean;
   aiState: "idle" | "queued" | "loading" | "done" | "error";
-  // Timestamp of last user interaction on this receipt
   lastModified?: number;
   // Raw AI detections (may include multiple receipts per image).
   aiDates?: AIDateEntry[];
+  // User-set rotation in degrees (0/90/180/270). Persisted per cacheKey and
+  // applied to previews AND baked into exported pixels.
+  rotation?: number;
 };
+
 
 type LogCategory = "user" | "token" | "client" | "server" | "third-party";
 
