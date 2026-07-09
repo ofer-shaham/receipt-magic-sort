@@ -1973,7 +1973,7 @@ export function ReceiptApp() {
                         {i + 1}
                       </div>
                       {r.compressed && (
-                        <img src={r.compressed.dataUrl} alt={r.name} className="h-12 w-12 rounded-md object-cover" />
+                        <img src={r.compressed.dataUrl} alt={r.name} className="h-12 w-12 rounded-md object-cover" style={{ transform: r.rotation ? `rotate(${r.rotation}deg)` : undefined }} />
                       )}
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium">{r.name}</p>
