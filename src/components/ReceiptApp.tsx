@@ -2293,6 +2293,7 @@ export function ReceiptApp() {
                         : x,
                     ),
                   );
+                  recordAnalysis(wizardReceipt.id, wizardReceipt.name, result.meta, result);
                   if (result.iso || result.raw) {
                     setWizardPendingDate({ iso: result.iso, raw: result.raw });
                     pushLog({
@@ -2306,15 +2307,23 @@ export function ReceiptApp() {
                     toast.info("No date detected");
                   }
                 } catch (e) {
+                  const msg = (e as Error).message;
+                  recordAnalysis(
+                    wizardReceipt.id,
+                    wizardReceipt.name,
+                    { provider: useGemini ? "gemini" : "openrouter", model: useGemini ? (settings.geminiModel || "gemini-2.0-flash") : model, latencyMs: 0, rawText: "" },
+                    null,
+                    msg,
+                  );
                   setReceipts((prev) =>
                     prev.map((x) => (x.id === wizardReceipt.id ? { ...x, aiState: "error" } : x)),
                   );
-                  toast.error(`AI failed: ${(e as Error).message}`);
+                  toast.error(`AI failed: ${msg}`);
                   pushLog({
                     category: "third-party",
                     level: "error",
                     source: "openrouter",
-                    message: `${wizardReceipt.name}: ${(e as Error).message}`,
+                    message: `${wizardReceipt.name}: ${msg}`,
                   });
                 }
               }}
