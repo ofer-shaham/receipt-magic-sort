@@ -339,6 +339,7 @@ export type AICallMeta = {
   costUsd?: number;
   latencyMs: number;
   rawText: string;
+  promptText?: string;
 };
 
 export type AIDateResultWithMeta = AIDateResult & { meta: AICallMeta };
@@ -366,7 +367,9 @@ export async function extractDateWithGemini(
   apiKey: string,
   dataUrl: string,
   model = "gemini-2.0-flash",
+  { prompt, signal }: { prompt?: string; signal?: AbortSignal } = {},
 ): Promise<AIDateResultWithMeta> {
+  const activePrompt = prompt ?? RECEIPT_PROMPT;
   const t0 = performance.now();
   const img = await loadImage(dataUrl);
   const canvas = document.createElement("canvas");
@@ -381,12 +384,13 @@ export async function extractDateWithGemini(
   )}:generateContent?key=${encodeURIComponent(apiKey)}`;
   const res = await fetch(url, {
     method: "POST",
+    signal,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [
         {
           parts: [
-            { text: RECEIPT_PROMPT },
+            { text: activePrompt },
             { inline_data: { mime_type: "image/jpeg", data: b64 } },
           ],
         },
@@ -417,6 +421,7 @@ export async function extractDateWithGemini(
       costUsd: undefined,
       latencyMs: Math.round(performance.now() - t0),
       rawText: txt,
+      promptText: activePrompt,
     },
   };
 }
@@ -425,7 +430,9 @@ export async function extractDateWithAI(
   apiKey: string,
   dataUrl: string,
   model: string,
+  { prompt, signal }: { prompt?: string; signal?: AbortSignal } = {},
 ): Promise<AIDateResultWithMeta> {
+  const activePrompt = prompt ?? RECEIPT_PROMPT;
   const t0 = performance.now();
   const img = await loadImage(dataUrl);
   const canvas = document.createElement("canvas");
@@ -437,6 +444,7 @@ export async function extractDateWithAI(
 
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
@@ -448,7 +456,7 @@ export async function extractDateWithAI(
         {
           role: "user",
           content: [
-            { type: "text", text: RECEIPT_PROMPT },
+            { type: "text", text: activePrompt },
             { type: "image_url", image_url: { url: cropped } },
           ],
         },
@@ -479,6 +487,7 @@ export async function extractDateWithAI(
       costUsd: typeof usage.cost === "number" ? usage.cost : undefined,
       latencyMs: Math.round(performance.now() - t0),
       rawText: txt,
+      promptText: activePrompt,
     },
   };
 }
@@ -599,7 +608,7 @@ export async function extractDateRoundRobin(
   startIndex: number,
   dataUrl: string,
   model: string,
-  options: RoundRobinOptions = {},
+  options: RoundRobinOptions & { prompt?: string; signal?: AbortSignal } = {},
 ): Promise<{ result: AIDateResultWithMeta; nextIndex: number; usedKeyIndex: number }> {
   if (!keys.length) throw new Error("No API key configured");
   const minInterval = options.minIntervalMs ?? 0;
@@ -632,7 +641,7 @@ export async function extractDateRoundRobin(
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       s.lastUsedAt = Date.now();
       try {
-        const result = await extractDateWithAI(key, dataUrl, model);
+        const result = await extractDateWithAI(key, dataUrl, model, { prompt: options.prompt, signal: options.signal });
         s.failures = 0;
         return {
           result,

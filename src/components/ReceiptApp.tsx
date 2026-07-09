@@ -11,6 +11,7 @@ import {
   fetchOpenRouterCredits,
   formatBytes,
   FREE_VISION_MODELS,
+  RECEIPT_PROMPT,
   rotateImageBlob,
   safeSlug,
   timestamp,
@@ -105,6 +106,7 @@ type UserActionLog = {
 
 const DATE_CACHE_KEY = "receipt-date-cache-v3";
 const API_KEYS_STORAGE_V2 = "openrouter-api-keys-v2";
+const PROMPT_STORAGE = "receipt-prompt-v1";
 const MODEL_STORAGE = "openrouter-model";
 const MODELS_LIST_STORAGE = "openrouter-models-list";
 const THEME_STORAGE = "receipt-theme";
@@ -138,6 +140,7 @@ export type AnalysisEntry = {
   raw: string | null;
   datesCount: number;
   error?: string;
+  promptText?: string;
 };
 
 
@@ -190,6 +193,7 @@ type Settings = {
   aiProvider: AIProvider;
   geminiApiKey: string;
   geminiModel: string;
+  concurrency: number;
 };
 const DEFAULT_SETTINGS: Settings = {
   minKeyIntervalSec: 0,
@@ -215,6 +219,7 @@ const DEFAULT_SETTINGS: Settings = {
   aiProvider: "auto",
   geminiApiKey: "",
   geminiModel: "gemini-2.0-flash",
+  concurrency: 3,
 };
 
 function loadSettings(): Settings {
@@ -297,10 +302,15 @@ export function ReceiptApp() {
   // Multi-receipt handling queue (images whose AI returned 2+ dates).
   const [multiQueueOpen, setMultiQueueOpen] = useState(false);
 
+  const [customPrompt, setCustomPrompt] = useState<string>(
+    () => localStorage.getItem(PROMPT_STORAGE) ?? "",
+  );
+
   const dateCache = useRef<Record<string, CachedDate>>(loadDateCache());
   const keyIndexRef = useRef(0);
   const keyStateRef = useRef<Record<string, KeyStatus>>({});
   const cancelAIRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
 
   const pushLog = useCallback((entry: Omit<LogEntry, "id" | "ts" | "category"> & { category?: LogCategory }) => {
@@ -335,6 +345,7 @@ export function ReceiptApp() {
       meta: AICallMeta,
       result: { iso: string | null; raw: string | null; dates: AIDateEntry[] } | null,
       error?: string,
+      promptText?: string,
     ) => {
       const certainty = result ? estimateCertainty(result) : 0;
       setAnalysisEntries((prev) =>
@@ -356,6 +367,7 @@ export function ReceiptApp() {
             raw: result?.raw ?? null,
             datesCount: result?.dates?.length ?? 0,
             error,
+            promptText: promptText ?? meta.promptText,
           },
           ...prev,
         ].slice(0, 500),
@@ -838,14 +850,21 @@ export function ReceiptApp() {
     }
   }, [pushLog]);
 
-  const runAI = async () => {
-    if (!apiKeys.length) {
-      toast.error("Add at least one OpenRouter API key");
+  const runAI = async (trialMode = false) => {
+    const hasOR = apiKeys.length > 0;
+    const hasGemini = !!settings.geminiApiKey.trim();
+    const provider = settings.aiProvider;
+    const useGemini =
+      provider === "gemini" || (provider === "auto" && !hasOR && hasGemini);
+
+    if (!hasOR && !hasGemini) {
+      toast.error("Add at least one API key (OpenRouter or Gemini)");
       return;
     }
     localStorage.setItem(MODEL_STORAGE, model);
 
-    const queue = receipts.filter((r) => !r.date && r.compressed);
+    let queue = receipts.filter((r) => !r.date && r.compressed);
+    if (trialMode) queue = queue.slice(0, 1);
     if (!queue.length) {
       toast.info("Nothing to extract — all receipts already dated");
       return;
@@ -857,155 +876,173 @@ export function ReceiptApp() {
       ),
     );
 
+    const abort = new AbortController();
+    abortControllerRef.current = abort;
     cancelAIRef.current = false;
     setAiRunning(true);
     setAiProgress({ done: 0, total: queue.length });
     let processed = 0;
     let fromCache = 0;
+    const activePrompt = customPrompt.trim() || RECEIPT_PROMPT;
+    let queueIdx = 0;
 
-    for (const r of queue) {
-      if (cancelAIRef.current) break;
-      const cached = dateCache.current[r.cacheKey];
-      if (cached !== undefined) {
-        setReceipts((prev) =>
-          prev.map((x) =>
-            x.id === r.id
-              ? {
-                  ...x,
-                  date: cached.iso ?? undefined,
-                  dateRaw: cached.raw ?? undefined,
-                  dateSource: cached.source,
-                  approved: cached.approved,
-                  aiState: "done",
-                  lastModified: Date.now(),
-                }
-              : x,
-          ),
-        );
-        fromCache++;
-        setAiProgress((p) => ({ ...p, done: p.done + 1 }));
-        continue;
-      }
-      setReceipts((prev) =>
-        prev.map((x) => (x.id === r.id ? { ...x, aiState: "loading" } : x)),
-      );
-      try {
-        const provider = settings.aiProvider;
-        const hasOR = apiKeys.length > 0;
-        const hasGemini = !!settings.geminiApiKey.trim();
-        const useGemini =
-          provider === "gemini" ||
-          (provider === "auto" && !hasOR && hasGemini);
-        let result: AIDateResultWithMeta;
-        let sourceLabel = "gemini";
-        if (useGemini) {
-          if (!hasGemini) throw new Error("Gemini API key is not set");
-          result = await extractDateWithGemini(
-            settings.geminiApiKey.trim(),
-            r.compressed!.dataUrl,
-            settings.geminiModel || "gemini-2.0-flash",
+    const processOne = async () => {
+      while (true) {
+        if (abort.signal.aborted) break;
+        const myIdx = queueIdx++;
+        if (myIdx >= queue.length) break;
+        const r = queue[myIdx];
+
+        const cached = dateCache.current[r.cacheKey];
+        if (cached !== undefined) {
+          setReceipts((prev) =>
+            prev.map((x) =>
+              x.id === r.id
+                ? {
+                    ...x,
+                    date: cached.iso ?? undefined,
+                    dateRaw: cached.raw ?? undefined,
+                    dateSource: cached.source,
+                    approved: cached.approved,
+                    aiState: "done",
+                    lastModified: Date.now(),
+                  }
+                : x,
+            ),
           );
-        } else {
-          try {
-            const rr = await extractDateRoundRobin(
-              apiKeys,
-              keyStateRef.current,
-              keyIndexRef.current,
+          fromCache++;
+          setAiProgress((p) => ({ ...p, done: p.done + 1 }));
+          continue;
+        }
+        setReceipts((prev) =>
+          prev.map((x) => (x.id === r.id ? { ...x, aiState: "loading" } : x)),
+        );
+        try {
+          let result: AIDateResultWithMeta;
+          let sourceLabel = "gemini";
+          if (useGemini) {
+            if (!hasGemini) throw new Error("Gemini API key is not set");
+            result = await extractDateWithGemini(
+              settings.geminiApiKey.trim(),
               r.compressed!.dataUrl,
-              model,
-              {
-                minIntervalMs: settings.minKeyIntervalSec * 1000,
-                cooldownAfterFailures: settings.cooldownAfterFailures,
-                cooldownMs: settings.cooldownSec * 1000,
-              },
+              settings.geminiModel || "gemini-2.0-flash",
+              { prompt: activePrompt, signal: abort.signal },
             );
-            keyIndexRef.current = rr.nextIndex;
-            result = rr.result;
-            sourceLabel = `openrouter/key#${rr.usedKeyIndex + 1}`;
-          } catch (err) {
-            if (
-              err instanceof InsufficientCreditsError &&
-              provider === "auto" &&
-              hasGemini
-            ) {
-              pushLog({
-                category: "third-party",
-                level: "warn",
-                source: "openrouter",
-                message: `Falling back to Gemini: ${(err as Error).message}`,
-              });
-              result = await extractDateWithGemini(
-                settings.geminiApiKey.trim(),
+          } else {
+            try {
+              const rr = await extractDateRoundRobin(
+                apiKeys,
+                keyStateRef.current,
+                keyIndexRef.current,
                 r.compressed!.dataUrl,
-                settings.geminiModel || "gemini-2.0-flash",
+                model,
+                {
+                  minIntervalMs: settings.minKeyIntervalSec * 1000,
+                  cooldownAfterFailures: settings.cooldownAfterFailures,
+                  cooldownMs: settings.cooldownSec * 1000,
+                  prompt: activePrompt,
+                  signal: abort.signal,
+                },
               );
-            } else {
-              throw err;
+              keyIndexRef.current = rr.nextIndex;
+              result = rr.result;
+              sourceLabel = `openrouter/key#${rr.usedKeyIndex + 1}`;
+            } catch (err) {
+              if (
+                err instanceof InsufficientCreditsError &&
+                provider === "auto" &&
+                hasGemini
+              ) {
+                pushLog({
+                  category: "third-party",
+                  level: "warn",
+                  source: "openrouter",
+                  message: `Falling back to Gemini: ${(err as Error).message}`,
+                });
+                result = await extractDateWithGemini(
+                  settings.geminiApiKey.trim(),
+                  r.compressed!.dataUrl,
+                  settings.geminiModel || "gemini-2.0-flash",
+                  { prompt: activePrompt, signal: abort.signal },
+                );
+              } else {
+                throw err;
+              }
             }
           }
-        }
 
-        dateCache.current[r.cacheKey] = {
-          iso: result.iso,
-          raw: result.raw,
-          source: "ai",
-          approved: false,
-        };
-        saveDateCache(dateCache.current);
-        setReceipts((prev) =>
-          prev.map((x) =>
-            x.id === r.id
-              ? {
-                  ...x,
-                  date: result.iso ?? undefined,
-                  dateRaw: result.raw ?? undefined,
-                  dateSource: "ai",
-                  approved: false,
-                  aiState: "done",
-                  aiDates: result.dates,
-                  lastModified: Date.now(),
-                }
-              : x,
-          ),
-        );
-        processed++;
-        recordAnalysis(r.id, r.name, result.meta, result);
-        pushLog({
-          category: "third-party",
-          level: "info",
-          source: sourceLabel,
-          message: `${r.name} → ${result.raw ?? "NONE"} (${result.iso ?? "—"})`,
-        });
-        pushUserAction("ai-extract", r.id, r.name, result.raw || result.iso || "no date");
-      } catch (e) {
-        const msg = (e as Error).message;
-        recordAnalysis(
-          r.id,
-          r.name,
-          {
-            provider: "openrouter",
-            model,
-            latencyMs: 0,
-            rawText: "",
-          },
-          null,
-          msg,
-        );
-        pushLog({
-          category: "third-party",
-          level: "error",
-          source: `openrouter/${model}`,
-          message: `${r.name}: ${msg}`,
-        });
-        setReceipts((prev) =>
-          prev.map((x) => (x.id === r.id ? { ...x, aiState: "error" } : x)),
-        );
-        toast.error(`AI failed: ${msg}`);
+          if (abort.signal.aborted) break;
+
+          dateCache.current[r.cacheKey] = {
+            iso: result.iso,
+            raw: result.raw,
+            source: "ai",
+            approved: false,
+          };
+          saveDateCache(dateCache.current);
+          setReceipts((prev) =>
+            prev.map((x) =>
+              x.id === r.id
+                ? {
+                    ...x,
+                    date: result.iso ?? undefined,
+                    dateRaw: result.raw ?? undefined,
+                    dateSource: "ai",
+                    approved: false,
+                    aiState: "done",
+                    aiDates: result.dates,
+                    lastModified: Date.now(),
+                  }
+                : x,
+            ),
+          );
+          processed++;
+          recordAnalysis(r.id, r.name, result.meta, result, undefined, activePrompt);
+          pushLog({
+            category: "third-party",
+            level: "info",
+            source: sourceLabel,
+            message: `${r.name} → ${result.raw ?? "NONE"} (${result.iso ?? "—"})`,
+          });
+          pushUserAction("ai-extract", r.id, r.name, result.raw || result.iso || "no date");
+        } catch (e) {
+          if ((e as Error).name === "AbortError") break;
+          const msg = (e as Error).message;
+          recordAnalysis(
+            r.id,
+            r.name,
+            { provider: "openrouter", model, latencyMs: 0, rawText: "" },
+            null,
+            msg,
+            activePrompt,
+          );
+          pushLog({
+            category: "third-party",
+            level: "error",
+            source: `openrouter/${model}`,
+            message: `${r.name}: ${msg}`,
+          });
+          setReceipts((prev) =>
+            prev.map((x) => (x.id === r.id ? { ...x, aiState: "error" } : x)),
+          );
+          toast.error(`AI failed: ${msg}`);
+        }
+        setAiProgress((p) => ({ ...p, done: p.done + 1 }));
       }
-      setAiProgress((p) => ({ ...p, done: p.done + 1 }));
-    }
+    };
+
+    const concurrency = Math.max(1, Math.min(10, settings.concurrency ?? 3));
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, queue.length) }, processOne),
+    );
+
     setAiRunning(false);
-    toast.success(`Extracted ${processed} dates (${fromCache} from cache)`);
+    abortControllerRef.current = null;
+    if (abort.signal.aborted) {
+      toast.info(`Stopped after ${processed} extracted.`);
+    } else {
+      toast.success(`Extracted ${processed} dates (${fromCache} from cache)`);
+    }
     refreshCredits(true);
   };
 
@@ -1431,16 +1468,47 @@ export function ReceiptApp() {
                 <AccordionTrigger className="py-2">Actions</AccordionTrigger>
                 <AccordionContent>
                   <div className="flex flex-wrap gap-2">
-                    <Button onClick={runAI} variant="secondary" size="sm" disabled={!receipts.length || aiRunning}>
+                    <Button onClick={() => runAI(false)} variant="secondary" size="sm" disabled={!receipts.length || aiRunning}>
                       {aiRunning ? (
                         <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />{aiProgress.done}/{aiProgress.total}</>
                       ) : (
                         <><Sparkles className="mr-1.5 h-4 w-4" /> Extract dates (AI)</>
                       )}
                     </Button>
+                    <Button
+                      onClick={() => runAI(true)}
+                      variant="outline"
+                      size="sm"
+                      disabled={!receipts.length || aiRunning}
+                      title="Send only 1 un-dated image — useful for testing prompt/model"
+                    >
+                      Trial (1)
+                    </Button>
                     {aiRunning && (
-                      <Button size="sm" variant="ghost" onClick={() => (cancelAIRef.current = true)}>Stop</Button>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => abortControllerRef.current?.abort()}
+                      >
+                        Stop
+                      </Button>
                     )}
+                    <div className="flex items-center gap-1" title="Concurrent AI requests">
+                      <Input
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={settings.concurrency}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            concurrency: Math.max(1, Math.min(10, Number(e.target.value) || 3)),
+                          }))
+                        }
+                        className="h-7 w-12 text-xs text-center"
+                      />
+                      <span className="text-[10px] text-muted-foreground">parallel</span>
+                    </div>
                     <Button onClick={() => startWizard()} variant="secondary" size="sm" disabled={!receipts.length}>
                       <Wand2 className="mr-1.5 h-4 w-4" /> Review wizard
                     </Button>
@@ -1866,6 +1934,37 @@ export function ReceiptApp() {
                   <p className="text-[11px] text-muted-foreground">
                     Lists active vision-capable models with max_price=0.
                   </p>
+                  <div className="space-y-1 border-t pt-2">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs">AI prompt</Label>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 px-2 text-[10px]"
+                        onClick={() => {
+                          setCustomPrompt("");
+                          localStorage.removeItem(PROMPT_STORAGE);
+                        }}
+                        disabled={!customPrompt}
+                      >
+                        Reset to default
+                      </Button>
+                    </div>
+                    <textarea
+                      value={customPrompt || RECEIPT_PROMPT}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setCustomPrompt(val === RECEIPT_PROMPT ? "" : val);
+                        localStorage.setItem(PROMPT_STORAGE, val === RECEIPT_PROMPT ? "" : val);
+                      }}
+                      className="w-full rounded-md border bg-background px-2 py-1.5 text-xs font-mono resize-y leading-relaxed"
+                      rows={3}
+                    />
+                    <p className="text-[10px] text-muted-foreground">
+                      {(customPrompt || RECEIPT_PROMPT).length} chars
+                      {customPrompt ? " · custom" : " · default"}
+                    </p>
+                  </div>
                 </AccordionContent>
               </AccordionItem>
               )}
@@ -2739,15 +2838,27 @@ export function ReceiptApp() {
             </DialogTitle>
           </DialogHeader>
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-            <span>
-              Total cost:{" "}
-              <span className="font-mono font-semibold text-primary">
-                ${analysisEntries.reduce((s, a) => s + (a.costUsd ?? 0), 0).toFixed(6)}
-              </span>{" "}
-              · Total tokens:{" "}
-              <span className="font-mono">
-                {analysisEntries.reduce((s, a) => s + (a.totalTokens ?? 0), 0)}
+            <span className="flex flex-wrap gap-x-3 gap-y-1">
+              <span>
+                Cost:{" "}
+                <span className="font-mono font-semibold text-primary">
+                  ${analysisEntries.reduce((s, a) => s + (a.costUsd ?? 0), 0).toFixed(6)}
+                </span>
               </span>
+              <span>
+                Tokens:{" "}
+                <span className="font-mono">
+                  {analysisEntries.reduce((s, a) => s + (a.totalTokens ?? 0), 0).toLocaleString()}
+                </span>
+              </span>
+              {credits != null && (
+                <span>
+                  Credits left:{" "}
+                  <span className="font-mono font-semibold text-emerald-600">
+                    ${credits.remaining.toFixed(4)}
+                  </span>
+                </span>
+              )}
             </span>
             <Button
               size="sm"
@@ -2765,6 +2876,7 @@ export function ReceiptApp() {
                   <th className="px-2 py-1 text-left">When</th>
                   <th className="px-2 py-1 text-left">Image</th>
                   <th className="px-2 py-1 text-left">Provider · Model</th>
+                  <th className="px-2 py-1 text-left">Prompt</th>
                   <th className="px-2 py-1 text-right">Tokens</th>
                   <th className="px-2 py-1 text-right">Cost</th>
                   <th className="px-2 py-1 text-right">Certainty</th>
@@ -2788,6 +2900,12 @@ export function ReceiptApp() {
                           {a.provider}
                         </span>{" "}
                         {a.model}
+                      </td>
+                      <td
+                        className="px-2 py-1 max-w-[200px] truncate font-mono text-[10px] text-muted-foreground"
+                        title={a.promptText ?? ""}
+                      >
+                        {a.promptText ? a.promptText.slice(0, 60) + (a.promptText.length > 60 ? "…" : "") : "—"}
                       </td>
                       <td className="px-2 py-1 text-right font-mono">
                         {a.totalTokens ?? "—"}
@@ -2842,7 +2960,7 @@ export function ReceiptApp() {
                 })}
                 {analysisEntries.length === 0 && (
                   <tr>
-                    <td colSpan={8} className="px-2 py-6 text-center text-muted-foreground">
+                    <td colSpan={9} className="px-2 py-6 text-center text-muted-foreground">
                       No AI calls yet this session.
                     </td>
                   </tr>
