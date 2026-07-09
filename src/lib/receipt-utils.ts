@@ -280,7 +280,7 @@ export class InsufficientCreditsError extends Error {
 }
 
 export const RECEIPT_PROMPT =
-  'You are reading one or more retail receipts in an image. For EACH distinct receipt, return its transaction date and a normalized bounding box that tightly frames that receipt. Receipts use DD/MM/YY (or DD/MM/YYYY) — day first, month second; never swap. Reply with ONE LINE of JSON: {"dates":[{"raw":"DD/MM/YY","iso":"YYYY-MM-DD","bbox":{"x":0.05,"y":0.10,"w":0.90,"h":0.40}}, ...]}. bbox coordinates are fractions 0..1 of the FULL image (x,y = top-left corner, w,h = width/height). raw MUST be DD/MM/YY (two-digit day, month, year). If the image contains multiple receipts, include one entry per receipt in reading order. If no date is visible, reply NONE.';
+  'Receipt photo. Find the top-most date (day/month/year order). Reply JSON only: {"iso":"YYYY-MM-DD"} or NONE.';
 
 export function parseReceiptDatesText(txt: string): AIDateResult {
   const trimmed = (txt ?? "").trim();
@@ -344,6 +344,9 @@ export type AICallMeta = {
 export type AIDateResultWithMeta = AIDateResult & { meta: AICallMeta };
 
 // Rough certainty heuristic (0..1) for a date result.
+// Primary signal: a valid ISO date (YYYY-MM-DD). Bonus points for richer
+// responses (DD/MM/YY raw text, bbox) preserved for backward-compat with
+// older cached results that were produced by the verbose prompt.
 export function estimateCertainty(r: AIDateResult): number {
   if (!r.dates?.length && !r.iso && !r.raw) return 0;
   const first = r.dates?.[0];
@@ -352,11 +355,10 @@ export function estimateCertainty(r: AIDateResult): number {
   const dmyOk = rawOk && /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/.test(first?.raw || r.raw || "");
   const bboxOk = !!first?.bbox;
   let score = 0;
-  if (isoOk) score += 0.5;
-  if (dmyOk) score += 0.3;
-  else if (rawOk) score += 0.15;
-  if (bboxOk) score += 0.1;
-  if ((r.dates?.length ?? 0) >= 1) score += 0.1;
+  if (isoOk) score += 0.8;  // ISO alone is the primary confidence signal
+  if (dmyOk) score += 0.1;  // bonus: explicit DD/MM/YY raw (old-prompt responses)
+  if (bboxOk) score += 0.05; // bonus: bbox present (old-prompt responses)
+  if ((r.dates?.length ?? 0) >= 1) score += 0.05;
   return Math.min(1, score);
 }
 
