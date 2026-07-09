@@ -2735,7 +2735,7 @@ function WizardStep({
     <div className="grid gap-4 md:grid-cols-[1.2fr_1fr]">
       <div className="max-h-[60vh] overflow-auto rounded-md border bg-muted/20">
         {receipt.compressed ? (
-          <img src={receipt.compressed.dataUrl} alt={receipt.name} className="block w-full" />
+          <img src={receipt.compressed.dataUrl} alt={receipt.name} className="block w-full" style={{ transform: receipt.rotation ? `rotate(${receipt.rotation}deg)` : undefined }} />
         ) : (
           <div className="flex h-40 items-center justify-center text-xs text-muted-foreground">Compressing…</div>
         )}
