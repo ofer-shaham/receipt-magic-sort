@@ -598,7 +598,7 @@ export async function extractDateRoundRobin(
   dataUrl: string,
   model: string,
   options: RoundRobinOptions = {},
-): Promise<{ result: AIDateResult; nextIndex: number; usedKeyIndex: number }> {
+): Promise<{ result: AIDateResultWithMeta; nextIndex: number; usedKeyIndex: number }> {
   if (!keys.length) throw new Error("No API key configured");
   const minInterval = options.minIntervalMs ?? 0;
   const failThreshold = options.cooldownAfterFailures ?? 3;
