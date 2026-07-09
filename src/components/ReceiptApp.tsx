@@ -959,6 +959,7 @@ export function ReceiptApp() {
           ),
         );
         processed++;
+        recordAnalysis(r.id, r.name, result.meta, result);
         pushLog({
           category: "third-party",
           level: "info",
@@ -968,6 +969,18 @@ export function ReceiptApp() {
         pushUserAction("ai-extract", r.id, r.name, result.raw || result.iso || "no date");
       } catch (e) {
         const msg = (e as Error).message;
+        recordAnalysis(
+          r.id,
+          r.name,
+          {
+            provider: "openrouter",
+            model,
+            latencyMs: 0,
+            rawText: "",
+          },
+          null,
+          msg,
+        );
         pushLog({
           category: "third-party",
           level: "error",
