@@ -4,18 +4,21 @@ import {
   buildRenamedArchive,
   compressImage,
   cropImageRegion,
+  estimateCertainty,
   extractDateRoundRobin,
   extractImagesFromArchive,
   fetchFreeVisionModelsList,
   fetchOpenRouterCredits,
   formatBytes,
   FREE_VISION_MODELS,
+  rotateImageBlob,
   safeSlug,
   timestamp,
   extractDateWithGemini,
   InsufficientCreditsError,
+  type AICallMeta,
   type AIDateEntry,
-  type AIDateResult,
+  type AIDateResultWithMeta,
   type BBox,
   type KeyStatus,
   type OpenRouterCredits,
@@ -43,7 +46,8 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { Upload, Download, Sparkles, ArrowUpDown, X, Loader as Loader2, FileText, KeyRound, TriangleAlert as AlertTriangle, ExternalLink, Trash2, RefreshCw, Tag, Archive, Wand as Wand2, ChevronLeft, ChevronRight, Plus, Sun, Moon, Droplet, FileDown, Upload as UploadIcon, Table as TableIcon, Maximize2, Check, Settings as SettingsIcon, EyeOff, Copy, Clock } from "lucide-react";
+import { Upload, Download, Sparkles, ArrowUpDown, X, Loader as Loader2, FileText, KeyRound, TriangleAlert as AlertTriangle, ExternalLink, Trash2, RefreshCw, Tag, Archive, Wand as Wand2, ChevronLeft, ChevronRight, Plus, Sun, Moon, Droplet, FileDown, Upload as UploadIcon, Table as TableIcon, Maximize2, Check, Settings as SettingsIcon, EyeOff, Copy, Clock, Lightbulb, ClipboardList, RotateCw } from "lucide-react";
+
 
 type DateSource = "ai" | "manual";
 type Theme = "light" | "dark" | "blue";
