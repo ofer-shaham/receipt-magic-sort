@@ -328,6 +328,59 @@ export function ReceiptApp() {
     });
   }, [pushLog]);
 
+  const recordAnalysis = useCallback(
+    (
+      imageId: string,
+      imageName: string,
+      meta: AICallMeta,
+      result: { iso: string | null; raw: string | null; dates: AIDateEntry[] } | null,
+      error?: string,
+    ) => {
+      const certainty = result ? estimateCertainty(result) : 0;
+      setAnalysisEntries((prev) =>
+        [
+          {
+            id: crypto.randomUUID(),
+            ts: Date.now(),
+            imageId,
+            imageName,
+            provider: meta.provider,
+            model: meta.model,
+            promptTokens: meta.promptTokens,
+            completionTokens: meta.completionTokens,
+            totalTokens: meta.totalTokens,
+            costUsd: meta.costUsd,
+            latencyMs: meta.latencyMs,
+            certainty,
+            iso: result?.iso ?? null,
+            raw: result?.raw ?? null,
+            datesCount: result?.dates?.length ?? 0,
+            error,
+          },
+          ...prev,
+        ].slice(0, 500),
+      );
+    },
+    [],
+  );
+
+  const setReceiptRotation = useCallback((id: string, deg: number) => {
+    const norm = ((deg % 360) + 360) % 360;
+    setReceipts((prev) =>
+      prev.map((x) => {
+        if (x.id !== id) return x;
+        dateCache.current[x.cacheKey] = {
+          ...(dateCache.current[x.cacheKey] ?? { iso: null, raw: null }),
+          rotation: norm,
+        };
+        saveDateCache(dateCache.current);
+        return { ...x, rotation: norm, lastModified: Date.now() };
+      }),
+    );
+  }, []);
+
+
+
   // Initial load
   useEffect(() => {
     try {
