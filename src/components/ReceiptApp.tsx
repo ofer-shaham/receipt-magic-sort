@@ -575,12 +575,22 @@ export function ReceiptApp() {
     setBuilding(true);
     try {
       const limit = Math.max(1, settings.maxPdfSizeMB) * 1024 * 1024;
-      const items: PdfItem[] = sortedReceipts
-        .filter((r) => !r.excluded)
-        .map((r) => ({
-          ...r.compressed!,
-          label: r.dateRaw || r.date || "",
-        }));
+      const included = sortedReceipts.filter((r) => !r.excluded);
+      const items: PdfItem[] = [];
+      for (const r of included) {
+        const rot = ((r.rotation ?? 0) % 360 + 360) % 360;
+        if (rot === 0) {
+          items.push({ ...r.compressed!, label: r.dateRaw || r.date || "" });
+        } else {
+          const rotated = await rotateImageBlob(r.compressed!.blob, rot);
+          items.push({
+            blob: rotated.blob,
+            width: rotated.width,
+            height: rotated.height,
+            label: r.dateRaw || r.date || "",
+          });
+        }
+      }
       if (!items.length) {
         toast.error("Nothing to include — every image is excluded.");
         return;
