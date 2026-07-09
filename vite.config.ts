@@ -14,6 +14,6 @@ export default defineConfig({
   },
   // Override Lovable's default IPv6 host ("::" breaks on Replit); keep port 8080.
   vite: {
-    server: { host: "0.0.0.0" },
+    server: { host: "0.0.0.0", allowedHosts: true },
   },
 });
