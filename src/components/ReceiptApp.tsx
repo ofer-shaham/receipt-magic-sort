@@ -648,6 +648,7 @@ export function ReceiptApp() {
         dateRaw: cached?.raw ?? undefined,
         dateSource: cached?.source,
         approved: cached?.approved,
+        rotation: cached?.rotation ?? 0,
         aiState: "idle",
         lastModified: now,
       };
