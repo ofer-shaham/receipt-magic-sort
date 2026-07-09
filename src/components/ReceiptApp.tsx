@@ -1444,6 +1444,48 @@ export function ReceiptApp() {
                     <Button onClick={() => startWizard()} variant="secondary" size="sm" disabled={!receipts.length}>
                       <Wand2 className="mr-1.5 h-4 w-4" /> Review wizard
                     </Button>
+                    <Button
+                      onClick={buildRecommendation}
+                      variant="outline"
+                      size="sm"
+                      title="Recommend best OpenRouter-free & Gemini vision models"
+                    >
+                      <Lightbulb className="mr-1.5 h-4 w-4" /> Recommend model
+                    </Button>
+                    <Button
+                      onClick={() => setAnalysisOpen(true)}
+                      variant="outline"
+                      size="sm"
+                      disabled={!analysisEntries.length}
+                      title="View AI-analysis history (session)"
+                    >
+                      <ClipboardList className="mr-1.5 h-4 w-4" />
+                      Analyses ({analysisEntries.length})
+                    </Button>
+                    {multiReceiptImages.length > 0 && (
+                      <Button
+                        onClick={startMultiReceiptQueue}
+                        size="sm"
+                        variant="secondary"
+                        className="bg-amber-500/15 text-amber-700 hover:bg-amber-500/25 dark:text-amber-400"
+                        title="Images with multiple receipts detected — click to crop them one by one"
+                      >
+                        <Scissors className="mr-1.5 h-4 w-4" />
+                        Multi-receipt ({multiReceiptImages.length})
+                      </Button>
+                    )}
+                    {unapprovedAI.length > 0 && (
+                      <Button
+                        onClick={startApprovalWizard}
+                        size="sm"
+                        variant="secondary"
+                        className="bg-primary/15 text-primary hover:bg-primary/25"
+                        title="AI dates awaiting your approval"
+                      >
+                        <Check className="mr-1.5 h-4 w-4" />
+                        Approve ({unapprovedAI.length})
+                      </Button>
+                    )}
                     <select
                       value={sortMode}
                       onChange={(e) => setSortMode(e.target.value as SortMode)}
