@@ -4,18 +4,21 @@ import {
   buildRenamedArchive,
   compressImage,
   cropImageRegion,
+  estimateCertainty,
   extractDateRoundRobin,
   extractImagesFromArchive,
   fetchFreeVisionModelsList,
   fetchOpenRouterCredits,
   formatBytes,
   FREE_VISION_MODELS,
+  rotateImageBlob,
   safeSlug,
   timestamp,
   extractDateWithGemini,
   InsufficientCreditsError,
+  type AICallMeta,
   type AIDateEntry,
-  type AIDateResult,
+  type AIDateResultWithMeta,
   type BBox,
   type KeyStatus,
   type OpenRouterCredits,
@@ -43,7 +46,8 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { Upload, Download, Sparkles, ArrowUpDown, X, Loader as Loader2, FileText, KeyRound, TriangleAlert as AlertTriangle, ExternalLink, Trash2, RefreshCw, Tag, Archive, Wand as Wand2, ChevronLeft, ChevronRight, Plus, Sun, Moon, Droplet, FileDown, Upload as UploadIcon, Table as TableIcon, Maximize2, Check, Settings as SettingsIcon, EyeOff, Copy, Clock } from "lucide-react";
+import { Upload, Download, Sparkles, ArrowUpDown, X, Loader as Loader2, FileText, KeyRound, TriangleAlert as AlertTriangle, ExternalLink, Trash2, RefreshCw, Tag, Archive, Wand as Wand2, ChevronLeft, ChevronRight, Plus, Sun, Moon, Droplet, FileDown, Upload as UploadIcon, Table as TableIcon, Maximize2, Check, Settings as SettingsIcon, EyeOff, Copy, Clock, Lightbulb, ClipboardList, RotateCw, Scissors, Eye } from "lucide-react";
+
 
 type DateSource = "ai" | "manual";
 type Theme = "light" | "dark" | "blue";
@@ -66,14 +70,16 @@ type Receipt = {
   date?: string | null;
   dateRaw?: string | null;
   dateSource?: DateSource;
-  // User has confirmed the displayed date is correct.
   approved?: boolean;
   aiState: "idle" | "queued" | "loading" | "done" | "error";
-  // Timestamp of last user interaction on this receipt
   lastModified?: number;
   // Raw AI detections (may include multiple receipts per image).
   aiDates?: AIDateEntry[];
+  // User-set rotation in degrees (0/90/180/270). Persisted per cacheKey and
+  // applied to previews AND baked into exported pixels.
+  rotation?: number;
 };
+
 
 type LogCategory = "user" | "token" | "client" | "server" | "third-party";
 
@@ -111,7 +117,29 @@ type CachedDate = {
   raw: string | null;
   source?: DateSource;
   approved?: boolean;
+  rotation?: number;
 };
+
+// Session-only record of every AI extraction call.
+export type AnalysisEntry = {
+  id: string;
+  ts: number;
+  imageId: string;
+  imageName: string;
+  provider: "openrouter" | "gemini";
+  model: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+  latencyMs: number;
+  certainty: number;
+  iso: string | null;
+  raw: string | null;
+  datesCount: number;
+  error?: string;
+};
+
 
 const MONTHS = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -253,6 +281,22 @@ export function ReceiptApp() {
   const [cropWizardId, setCropWizardId] = useState<string | null>(null);
   const [pdfsStale, setPdfsStale] = useState(false);
 
+  // Session-only analysis report (never persisted).
+  const [analysisEntries, setAnalysisEntries] = useState<AnalysisEntry[]>([]);
+  const [analysisOpen, setAnalysisOpen] = useState(false);
+
+  // Recommendation dialog state
+  const [recommendOpen, setRecommendOpen] = useState(false);
+  const [recommendation, setRecommendation] = useState<null | {
+    openrouter: { model: string; note: string } | null;
+    gemini: { model: string; note: string };
+    compare: string;
+    loading: boolean;
+  }>(null);
+
+  // Multi-receipt handling queue (images whose AI returned 2+ dates).
+  const [multiQueueOpen, setMultiQueueOpen] = useState(false);
+
   const dateCache = useRef<Record<string, CachedDate>>(loadDateCache());
   const keyIndexRef = useRef(0);
   const keyStateRef = useRef<Record<string, KeyStatus>>({});
@@ -283,6 +327,59 @@ export function ReceiptApp() {
       message: `${action}: ${imageName}${details ? ` (${details})` : ""}`,
     });
   }, [pushLog]);
+
+  const recordAnalysis = useCallback(
+    (
+      imageId: string,
+      imageName: string,
+      meta: AICallMeta,
+      result: { iso: string | null; raw: string | null; dates: AIDateEntry[] } | null,
+      error?: string,
+    ) => {
+      const certainty = result ? estimateCertainty(result) : 0;
+      setAnalysisEntries((prev) =>
+        [
+          {
+            id: crypto.randomUUID(),
+            ts: Date.now(),
+            imageId,
+            imageName,
+            provider: meta.provider,
+            model: meta.model,
+            promptTokens: meta.promptTokens,
+            completionTokens: meta.completionTokens,
+            totalTokens: meta.totalTokens,
+            costUsd: meta.costUsd,
+            latencyMs: meta.latencyMs,
+            certainty,
+            iso: result?.iso ?? null,
+            raw: result?.raw ?? null,
+            datesCount: result?.dates?.length ?? 0,
+            error,
+          },
+          ...prev,
+        ].slice(0, 500),
+      );
+    },
+    [],
+  );
+
+  const setReceiptRotation = useCallback((id: string, deg: number) => {
+    const norm = ((deg % 360) + 360) % 360;
+    setReceipts((prev) =>
+      prev.map((x) => {
+        if (x.id !== id) return x;
+        dateCache.current[x.cacheKey] = {
+          ...(dateCache.current[x.cacheKey] ?? { iso: null, raw: null }),
+          rotation: norm,
+        };
+        saveDateCache(dateCache.current);
+        return { ...x, rotation: norm, lastModified: Date.now() };
+      }),
+    );
+  }, []);
+
+
 
   // Initial load
   useEffect(() => {
@@ -478,12 +575,22 @@ export function ReceiptApp() {
     setBuilding(true);
     try {
       const limit = Math.max(1, settings.maxPdfSizeMB) * 1024 * 1024;
-      const items: PdfItem[] = sortedReceipts
-        .filter((r) => !r.excluded)
-        .map((r) => ({
-          ...r.compressed!,
-          label: r.dateRaw || r.date || "",
-        }));
+      const included = sortedReceipts.filter((r) => !r.excluded);
+      const items: PdfItem[] = [];
+      for (const r of included) {
+        const rot = ((r.rotation ?? 0) % 360 + 360) % 360;
+        if (rot === 0) {
+          items.push({ ...r.compressed!, label: r.dateRaw || r.date || "" });
+        } else {
+          const rotated = await rotateImageBlob(r.compressed!.blob, rot);
+          items.push({
+            blob: rotated.blob,
+            width: rotated.width,
+            height: rotated.height,
+            label: r.dateRaw || r.date || "",
+          });
+        }
+      }
       if (!items.length) {
         toast.error("Nothing to include — every image is excluded.");
         return;
@@ -551,6 +658,7 @@ export function ReceiptApp() {
         dateRaw: cached?.raw ?? undefined,
         dateSource: cached?.source,
         approved: cached?.approved,
+        rotation: cached?.rotation ?? 0,
         aiState: "idle",
         lastModified: now,
       };
@@ -788,7 +896,7 @@ export function ReceiptApp() {
         const useGemini =
           provider === "gemini" ||
           (provider === "auto" && !hasOR && hasGemini);
-        let result: AIDateResult;
+        let result: AIDateResultWithMeta;
         let sourceLabel = "gemini";
         if (useGemini) {
           if (!hasGemini) throw new Error("Gemini API key is not set");
@@ -861,6 +969,7 @@ export function ReceiptApp() {
           ),
         );
         processed++;
+        recordAnalysis(r.id, r.name, result.meta, result);
         pushLog({
           category: "third-party",
           level: "info",
@@ -870,6 +979,18 @@ export function ReceiptApp() {
         pushUserAction("ai-extract", r.id, r.name, result.raw || result.iso || "no date");
       } catch (e) {
         const msg = (e as Error).message;
+        recordAnalysis(
+          r.id,
+          r.name,
+          {
+            provider: "openrouter",
+            model,
+            latencyMs: 0,
+            rawText: "",
+          },
+          null,
+          msg,
+        );
         pushLog({
           category: "third-party",
           level: "error",
@@ -924,6 +1045,103 @@ export function ReceiptApp() {
   }, [yearStart, yearEnd]);
 
   const previewImage = receipts.find((r) => r.id === imagePreviewId);
+
+  // Images whose AI detection returned multiple receipts.
+  const multiReceiptImages = useMemo(
+    () => sortedReceipts.filter((r) => (r.aiDates?.length ?? 0) > 1),
+    [sortedReceipts],
+  );
+  const unapprovedAI = useMemo(
+    () =>
+      sortedReceipts.filter(
+        (r) => r.date && r.dateSource === "ai" && !r.approved,
+      ),
+    [sortedReceipts],
+  );
+
+  // Start the wizard filtered to unapproved AI detections only.
+  const startApprovalWizard = () => {
+    const q = unapprovedAI.map((r) => r.id);
+    if (!q.length) {
+      toast.info("Nothing to approve — all AI dates already approved");
+      return;
+    }
+    setWizardQueue(q);
+    setWizardPos(0);
+    setWizardPendingDate(null);
+    setWizardOpen(true);
+  };
+
+  // Multi-receipt queue: opens the crop wizard on the first multi-receipt
+  // image, then advances via the wizard's dialog onOpenChange handler below.
+  const startMultiReceiptQueue = () => {
+    if (!multiReceiptImages.length) return;
+    setMultiQueueOpen(true);
+    setCropWizardId(multiReceiptImages[0].id);
+    setCropWizardOpen(true);
+  };
+
+  const buildRecommendation = async () => {
+    setRecommendOpen(true);
+    setRecommendation({
+      openrouter: null,
+      gemini: { model: "gemini-2.5-flash-lite", note: "" },
+      compare: "",
+      loading: true,
+    });
+    try {
+      const [freeList, cr] = await Promise.all([
+        fetchFreeVisionModelsList().catch(() => [] as string[]),
+        apiKeys[0]
+          ? fetchOpenRouterCredits(apiKeys[0]).catch(() => null)
+          : Promise.resolve(null),
+      ]);
+      // Prefer Gemini vision on free tier when available.
+      const preferOrder = [
+        "google/gemini-2.0-flash-exp:free",
+        "google/gemini-2.5-flash-image:free",
+        "qwen/qwen2.5-vl-72b-instruct:free",
+        "meta-llama/llama-3.2-11b-vision-instruct:free",
+      ];
+      const orModel =
+        preferOrder.find((m) => freeList.includes(m)) ??
+        freeList[0] ??
+        FREE_VISION_MODELS[0];
+      const orNote = freeList.length
+        ? `Picked from ${freeList.length} vision-capable free models. Rate-limited by OpenRouter (~10/min per key, ~200/day).`
+        : "Free model list unavailable — using built-in fallback.";
+      const remaining = cr?.remaining ?? 0;
+      // Direct Gemini choice.
+      const geminiModel =
+        remaining < 0.01 && !settings.geminiApiKey.trim()
+          ? "gemini-2.5-flash-lite"
+          : "gemini-2.5-flash-lite";
+      const geminiNote =
+        "Cheapest Gemini vision model (~$0.10/1M in, $0.40/1M out). ~1.4K in + 80 out per receipt = ~$0.00018/req → ~5,500 req/$1. Bypasses OpenRouter rate limits.";
+      let compare = "";
+      if (
+        orModel.startsWith("google/gemini") &&
+        geminiModel.startsWith("gemini")
+      ) {
+        compare =
+          "Same underlying family (Google Gemini vision). The free OpenRouter route is $0 but rate-limited; the direct Gemini API costs ~$0.0002/receipt with no free-tier daily cap and higher throughput.";
+      } else {
+        compare =
+          "Different providers. OpenRouter free route saves money but rate-limits daily; Gemini direct is paid but faster and unlimited.";
+      }
+      setRecommendation({
+        openrouter: { model: orModel, note: orNote },
+        gemini: { model: geminiModel, note: geminiNote },
+        compare,
+        loading: false,
+      });
+    } catch (e) {
+      toast.error(`Recommendation failed: ${(e as Error).message}`);
+      setRecommendation((r) => (r ? { ...r, loading: false } : r));
+    }
+  };
+
+
 
   const buildWizardQueue = () => {
     // Priority: untagged → AI-tagged-but-unapproved → approved/manual
@@ -1064,17 +1282,27 @@ export function ReceiptApp() {
     if (!sortedReceipts.length) return;
     const items: { blob: Blob; name: string }[] = [];
     for (const r of sortedReceipts) {
-      const blob: Blob = r.compressed?.blob ?? r.file;
-      const ext = (r.name.match(/\.([a-z0-9]+)$/i)?.[1] || "jpg").toLowerCase();
+      const rot = ((r.rotation ?? 0) % 360 + 360) % 360;
+      const srcBlob: Blob = r.compressed?.blob ?? r.file;
+      let outBlob: Blob = srcBlob;
+      let ext = (r.name.match(/\.([a-z0-9]+)$/i)?.[1] || "jpg").toLowerCase();
+      if (rot !== 0) {
+        const rotated = await rotateImageBlob(srcBlob, rot);
+        outBlob = rotated.blob;
+        ext = "jpg";
+      }
+      const rawBase = safeSlug(r.name.replace(/\.[^.]+$/, ""));
+      const rotSuffix = rot !== 0 ? "_rotated" : "";
       const base = r.date
-        ? `${r.date}_${safeSlug(r.name.replace(/\.[^.]+$/, ""))}`
-        : `undated_${safeSlug(r.name.replace(/\.[^.]+$/, ""))}`;
-      items.push({ blob, name: `${base}.${ext}` });
+        ? `${r.date}_${rawBase}${rotSuffix}`
+        : `undated_${rawBase}${rotSuffix}`;
+      items.push({ blob: outBlob, name: `${base}.${ext}` });
     }
     toast.info("Building archive…");
     const zip = await buildRenamedArchive(items);
     triggerDownload(zip, `receipts-renamed-${stamp()}.zip`);
   };
+
 
   // Year×Month matrix data
   const matrix = useMemo(() => {
@@ -1216,6 +1444,48 @@ export function ReceiptApp() {
                     <Button onClick={() => startWizard()} variant="secondary" size="sm" disabled={!receipts.length}>
                       <Wand2 className="mr-1.5 h-4 w-4" /> Review wizard
                     </Button>
+                    <Button
+                      onClick={buildRecommendation}
+                      variant="outline"
+                      size="sm"
+                      title="Recommend best OpenRouter-free & Gemini vision models"
+                    >
+                      <Lightbulb className="mr-1.5 h-4 w-4" /> Recommend model
+                    </Button>
+                    <Button
+                      onClick={() => setAnalysisOpen(true)}
+                      variant="outline"
+                      size="sm"
+                      disabled={!analysisEntries.length}
+                      title="View AI-analysis history (session)"
+                    >
+                      <ClipboardList className="mr-1.5 h-4 w-4" />
+                      Analyses ({analysisEntries.length})
+                    </Button>
+                    {multiReceiptImages.length > 0 && (
+                      <Button
+                        onClick={startMultiReceiptQueue}
+                        size="sm"
+                        variant="secondary"
+                        className="bg-amber-500/15 text-amber-700 hover:bg-amber-500/25 dark:text-amber-400"
+                        title="Images with multiple receipts detected — click to crop them one by one"
+                      >
+                        <Scissors className="mr-1.5 h-4 w-4" />
+                        Multi-receipt ({multiReceiptImages.length})
+                      </Button>
+                    )}
+                    {unapprovedAI.length > 0 && (
+                      <Button
+                        onClick={startApprovalWizard}
+                        size="sm"
+                        variant="secondary"
+                        className="bg-primary/15 text-primary hover:bg-primary/25"
+                        title="AI dates awaiting your approval"
+                      >
+                        <Check className="mr-1.5 h-4 w-4" />
+                        Approve ({unapprovedAI.length})
+                      </Button>
+                    )}
                     <select
                       value={sortMode}
                       onChange={(e) => setSortMode(e.target.value as SortMode)}
@@ -1703,7 +1973,7 @@ export function ReceiptApp() {
                         {i + 1}
                       </div>
                       {r.compressed && (
-                        <img src={r.compressed.dataUrl} alt={r.name} className="h-12 w-12 rounded-md object-cover" />
+                        <img src={r.compressed.dataUrl} alt={r.name} className="h-12 w-12 rounded-md object-cover" style={{ transform: r.rotation ? `rotate(${r.rotation}deg)` : undefined }} />
                       )}
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium">{r.name}</p>
@@ -2007,6 +2277,16 @@ export function ReceiptApp() {
                           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><line x1="20" y1="4" x2="8.12" y2="15.88" /><line x1="14.47" y1="14.48" x2="20" y2="20" /><line x1="8.12" y1="8.12" x2="12" y2="12" /></svg>
                         </button>
                         <button
+                          className="rounded bg-black/60 p-1 text-white hover:bg-black/80"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setReceiptRotation(r.id, (r.rotation ?? 0) + 90);
+                          }}
+                          title="Rotate 90° (persists in previews & baked into export)"
+                        >
+                          <RotateCw className="h-3 w-3" />
+                        </button>
+                        <button
                           className={`rounded p-1 text-white ${r.excluded ? "bg-emerald-600/80 hover:bg-emerald-600" : "bg-yellow-600/70 hover:bg-yellow-600"}`}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -2028,7 +2308,7 @@ export function ReceiptApp() {
                         </button>
                       </div>
                       {r.compressed ? (
-                        <img src={r.compressed.dataUrl} alt={`Page ${i + 1}`} className="block w-full" />
+                        <img src={r.compressed.dataUrl} alt={`Page ${i + 1}`} className="block w-full" style={{ transform: r.rotation ? `rotate(${r.rotation}deg)` : undefined }} />
                       ) : (
                         <div className="flex h-32 items-center justify-center text-xs text-muted-foreground">
                           <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Compressing…
@@ -2052,6 +2332,10 @@ export function ReceiptApp() {
         onOpenChange={(o) => !o && setImagePreviewId(null)}
         src={previewImage?.compressed?.dataUrl ?? null}
         name={previewImage?.name ?? ""}
+        rotation={previewImage?.rotation ?? 0}
+        onRotationChange={(deg) => {
+          if (previewImage) setReceiptRotation(previewImage.id, deg);
+        }}
         onOpenCropWizard={
           previewImage
             ? () => {
@@ -2068,7 +2352,33 @@ export function ReceiptApp() {
         open={cropWizardOpen}
         onOpenChange={(o) => {
           setCropWizardOpen(o);
-          if (!o) setCropWizardId(null);
+          if (!o) {
+            const closedId = cropWizardId;
+            setCropWizardId(null);
+            // Multi-receipt queue: advance to next remaining multi-receipt image.
+            if (multiQueueOpen) {
+              const remaining = multiReceiptImages.filter(
+                (r) => r.id !== closedId,
+              );
+              if (remaining.length) {
+                setTimeout(() => {
+                  setCropWizardId(remaining[0].id);
+                  setCropWizardOpen(true);
+                }, 100);
+              } else {
+                setMultiQueueOpen(false);
+                toast.success(
+                  "Multi-receipt queue complete — you can now export a fresh archive.",
+                  {
+                    action: {
+                      label: "Export ZIP",
+                      onClick: () => downloadRenamedArchive(),
+                    },
+                  },
+                );
+              }
+            }
+          }
         }}
         imageSrc={cropTarget?.compressed?.dataUrl ?? null}
         imageName={cropTarget?.name ?? ""}
@@ -2133,7 +2443,7 @@ export function ReceiptApp() {
                   prev.map((x) => (x.id === wizardReceipt.id ? { ...x, aiState: "loading" } : x)),
                 );
                 try {
-                  let result: AIDateResult;
+                  let result: AIDateResultWithMeta;
                   let sourceLabel = "gemini";
                   if (useGemini) {
                     result = await extractDateWithGemini(
@@ -2182,6 +2492,7 @@ export function ReceiptApp() {
                         : x,
                     ),
                   );
+                  recordAnalysis(wizardReceipt.id, wizardReceipt.name, result.meta, result);
                   if (result.iso || result.raw) {
                     setWizardPendingDate({ iso: result.iso, raw: result.raw });
                     pushLog({
@@ -2195,15 +2506,23 @@ export function ReceiptApp() {
                     toast.info("No date detected");
                   }
                 } catch (e) {
+                  const msg = (e as Error).message;
+                  recordAnalysis(
+                    wizardReceipt.id,
+                    wizardReceipt.name,
+                    { provider: useGemini ? "gemini" : "openrouter", model: useGemini ? (settings.geminiModel || "gemini-2.0-flash") : model, latencyMs: 0, rawText: "" },
+                    null,
+                    msg,
+                  );
                   setReceipts((prev) =>
                     prev.map((x) => (x.id === wizardReceipt.id ? { ...x, aiState: "error" } : x)),
                   );
-                  toast.error(`AI failed: ${(e as Error).message}`);
+                  toast.error(`AI failed: ${msg}`);
                   pushLog({
                     category: "third-party",
                     level: "error",
                     source: "openrouter",
-                    message: `${wizardReceipt.name}: ${(e as Error).message}`,
+                    message: `${wizardReceipt.name}: ${msg}`,
                   });
                 }
               }}
@@ -2333,6 +2652,207 @@ export function ReceiptApp() {
         </DialogContent>
       </Dialog>
 
+      {/* Recommendation dialog */}
+      <Dialog open={recommendOpen} onOpenChange={setRecommendOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Lightbulb className="h-4 w-4 text-primary" /> Model recommendation
+            </DialogTitle>
+          </DialogHeader>
+          {!recommendation || recommendation.loading ? (
+            <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Querying OpenRouter…
+            </div>
+          ) : (
+            <div className="space-y-3 text-sm">
+              <div className="rounded-md border p-3">
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                    Best OpenRouter free model
+                  </span>
+                  {recommendation.openrouter && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setModel(recommendation.openrouter!.model);
+                        localStorage.setItem(MODEL_STORAGE, recommendation.openrouter!.model);
+                        setSettings((s) => ({ ...s, aiProvider: "openrouter" }));
+                        toast.success("Applied OpenRouter model");
+                      }}
+                    >
+                      Apply
+                    </Button>
+                  )}
+                </div>
+                <p className="font-mono text-xs">
+                  {recommendation.openrouter?.model ?? "—"}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {recommendation.openrouter?.note ?? "No free models available."}
+                </p>
+              </div>
+
+              <div className="rounded-md border p-3">
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                    Best Gemini direct model
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setSettings((s) => ({
+                        ...s,
+                        aiProvider: "gemini",
+                        geminiModel: recommendation.gemini.model,
+                      }));
+                      toast.success("Applied Gemini model");
+                    }}
+                  >
+                    Apply
+                  </Button>
+                </div>
+                <p className="font-mono text-xs">{recommendation.gemini.model}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {recommendation.gemini.note}
+                </p>
+              </div>
+
+              <div className="rounded-md bg-muted/40 p-3 text-xs">
+                <p className="font-semibold">Comparison</p>
+                <p className="mt-1 text-muted-foreground">{recommendation.compare}</p>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Analysis report dialog */}
+      <Dialog open={analysisOpen} onOpenChange={setAnalysisOpen}>
+        <DialogContent className="max-w-5xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ClipboardList className="h-4 w-4 text-primary" />
+              AI analysis report ({analysisEntries.length} calls this session)
+            </DialogTitle>
+          </DialogHeader>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+            <span>
+              Total cost:{" "}
+              <span className="font-mono font-semibold text-primary">
+                ${analysisEntries.reduce((s, a) => s + (a.costUsd ?? 0), 0).toFixed(6)}
+              </span>{" "}
+              · Total tokens:{" "}
+              <span className="font-mono">
+                {analysisEntries.reduce((s, a) => s + (a.totalTokens ?? 0), 0)}
+              </span>
+            </span>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setAnalysisEntries([])}
+              disabled={!analysisEntries.length}
+            >
+              <Trash2 className="mr-1 h-3 w-3" /> Clear
+            </Button>
+          </div>
+          <div className="max-h-[65vh] overflow-auto rounded-md border">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-muted/60 backdrop-blur">
+                <tr>
+                  <th className="px-2 py-1 text-left">When</th>
+                  <th className="px-2 py-1 text-left">Image</th>
+                  <th className="px-2 py-1 text-left">Provider · Model</th>
+                  <th className="px-2 py-1 text-right">Tokens</th>
+                  <th className="px-2 py-1 text-right">Cost</th>
+                  <th className="px-2 py-1 text-right">Certainty</th>
+                  <th className="px-2 py-1 text-left">Date</th>
+                  <th className="px-2 py-1"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {analysisEntries.map((a) => {
+                  const stillExists = receipts.some((r) => r.id === a.imageId);
+                  return (
+                    <tr key={a.id} className="border-t">
+                      <td className="px-2 py-1 whitespace-nowrap font-mono text-[10px] text-muted-foreground">
+                        {new Date(a.ts).toLocaleTimeString()}
+                      </td>
+                      <td className="px-2 py-1 max-w-[220px] truncate font-mono" title={a.imageName}>
+                        {a.imageName}
+                      </td>
+                      <td className="px-2 py-1 font-mono text-[10px]">
+                        <span className="rounded bg-primary/10 px-1 py-0.5 text-primary">
+                          {a.provider}
+                        </span>{" "}
+                        {a.model}
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {a.totalTokens ?? "—"}
+                        {a.promptTokens != null && a.completionTokens != null && (
+                          <span className="ml-1 text-muted-foreground">
+                            ({a.promptTokens}/{a.completionTokens})
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {a.costUsd != null ? `$${a.costUsd.toFixed(6)}` : "—"}
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        <span
+                          className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                            a.certainty >= 0.7
+                              ? "bg-emerald-500/15 text-emerald-600"
+                              : a.certainty >= 0.4
+                                ? "bg-amber-500/15 text-amber-600"
+                                : "bg-destructive/15 text-destructive"
+                          }`}
+                        >
+                          {Math.round(a.certainty * 100)}%
+                        </span>
+                      </td>
+                      <td className="px-2 py-1 font-mono">
+                        {a.error ? (
+                          <span className="text-destructive">err: {a.error.slice(0, 40)}</span>
+                        ) : (
+                          a.raw || a.iso || "—"
+                        )}
+                        {a.datesCount > 1 && (
+                          <span className="ml-1 text-amber-600">×{a.datesCount}</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          disabled={!stillExists}
+                          title={stillExists ? "Open image preview" : "Image no longer in session"}
+                          onClick={() => {
+                            setImagePreviewId(a.imageId);
+                            setAnalysisOpen(false);
+                          }}
+                        >
+                          <Eye className="h-3 w-3" />
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {analysisEntries.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="px-2 py-6 text-center text-muted-foreground">
+                      No AI calls yet this session.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Controls visibility settings */}
       <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}>
         <DialogContent className="max-w-md">
@@ -2416,7 +2936,7 @@ function WizardStep({
     <div className="grid gap-4 md:grid-cols-[1.2fr_1fr]">
       <div className="max-h-[60vh] overflow-auto rounded-md border bg-muted/20">
         {receipt.compressed ? (
-          <img src={receipt.compressed.dataUrl} alt={receipt.name} className="block w-full" />
+          <img src={receipt.compressed.dataUrl} alt={receipt.name} className="block w-full" style={{ transform: receipt.rotation ? `rotate(${receipt.rotation}deg)` : undefined }} />
         ) : (
           <div className="flex h-40 items-center justify-center text-xs text-muted-foreground">Compressing…</div>
         )}

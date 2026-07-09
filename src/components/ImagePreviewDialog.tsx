@@ -8,6 +8,8 @@ export type ImagePreviewDialogProps = {
   onOpenChange: (open: boolean) => void;
   src: string | null;
   name: string;
+  rotation?: number;
+  onRotationChange?: (deg: number) => void;
   onOpenCropWizard?: () => void;
 };
 
@@ -16,9 +18,17 @@ export function ImagePreviewDialog({
   onOpenChange,
   src,
   name,
+  rotation: rotationProp,
+  onRotationChange,
   onOpenCropWizard,
 }: ImagePreviewDialogProps) {
-  const [rotation, setRotation] = useState(0);
+  const [rotationLocal, setRotationLocal] = useState(0);
+  const rotation = rotationProp ?? rotationLocal;
+  const setRotation = (fn: (r: number) => number) => {
+    const next = fn(rotation);
+    if (onRotationChange) onRotationChange(next);
+    else setRotationLocal(next);
+  };
   const [zoomEnabled, setZoomEnabled] = useState(true);
   const [zoom, setZoom] = useState({ visible: false, x: 0, y: 0, bgX: 0, bgY: 0 });
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -32,10 +42,8 @@ export function ImagePreviewDialog({
     const r = el.getBoundingClientRect();
     const x = e.clientX - r.left;
     const y = e.clientY - r.top;
-    // Position loupe so it doesn't cover cursor; keep inside container
     const lx = Math.min(Math.max(0, x - LOUPE / 2), r.width - LOUPE);
     const ly = Math.min(Math.max(0, y - LOUPE / 2), r.height - LOUPE);
-    // Background-position for magnified image
     const bgX = -(x * MAG - LOUPE / 2);
     const bgY = -(y * MAG - LOUPE / 2);
     setZoom({ visible: true, x: lx, y: ly, bgX, bgY });
@@ -47,11 +55,11 @@ export function ImagePreviewDialog({
       onOpenChange={(o) => {
         onOpenChange(o);
         if (!o) {
-          setRotation(0);
           setZoom((z) => ({ ...z, visible: false }));
         }
       }}
     >
+
       <DialogContent className="max-w-6xl">
         <DialogHeader>
           <DialogTitle className="flex flex-wrap items-center justify-between gap-2">
