@@ -973,6 +973,7 @@ export function ReceiptApp() {
                     source: `openrouter/${m}`,
                     message: `${r.name}: ${msg}`,
                   });
+                  if (isDeadModel(msg)) pruneModel(m);
                   return { ok: false as const, model: m, err: msg };
                 }
               }),
