@@ -256,6 +256,7 @@ export function ReceiptApp() {
   const [models, setModels] = useState<string[]>([...FREE_VISION_MODELS]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [model, setModel] = useState<string>(FREE_VISION_MODELS[0]);
+  const [queryAllModels, setQueryAllModels] = useState<boolean>(false);
   const [pdfs, setPdfs] = useState<
     { url: string; size: number; pageCount: number }[]
   >([]);
