@@ -6,6 +6,7 @@ import {
   cropImageRegion,
   estimateCertainty,
   extractDateRoundRobin,
+  extractDateWithAI,
   extractImagesFromArchive,
   fetchFreeVisionModelsList,
   fetchOpenRouterCredits,
@@ -255,6 +256,7 @@ export function ReceiptApp() {
   const [models, setModels] = useState<string[]>([...FREE_VISION_MODELS]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [model, setModel] = useState<string>(FREE_VISION_MODELS[0]);
+  const [queryAllModels, setQueryAllModels] = useState<boolean>(false);
   const [pdfs, setPdfs] = useState<
     { url: string; size: number; pageCount: number }[]
   >([]);
@@ -928,6 +930,48 @@ export function ReceiptApp() {
               settings.geminiModel || "gemini-2.0-flash",
               { prompt: activePrompt, signal: abort.signal },
             );
+          } else if (queryAllModels && models.length > 1) {
+            const modelList = models.slice();
+            const outcomes = await Promise.all(
+              modelList.map(async (m, i) => {
+                const key = apiKeys[i % apiKeys.length];
+                try {
+                  const res = await extractDateWithAI(key, r.compressed!.dataUrl, m, {
+                    prompt: activePrompt,
+                    signal: abort.signal,
+                  });
+                  recordAnalysis(r.id, r.name, res.meta, res, undefined, activePrompt);
+                  return { ok: true as const, model: m, res };
+                } catch (err) {
+                  const msg = (err as Error).message;
+                  recordAnalysis(
+                    r.id,
+                    r.name,
+                    { provider: "openrouter", model: m, latencyMs: 0, rawText: "" },
+                    null,
+                    msg,
+                    activePrompt,
+                  );
+                  pushLog({
+                    category: "third-party",
+                    level: "warn",
+                    source: `openrouter/${m}`,
+                    message: `${r.name}: ${msg}`,
+                  });
+                  return { ok: false as const, model: m, err: msg };
+                }
+              }),
+            );
+            const successes = outcomes.filter((o) => o.ok) as Array<
+              Extract<(typeof outcomes)[number], { ok: true }>
+            >;
+            const best =
+              successes.find((s) => s.res.iso) ??
+              successes.find((s) => s.res.raw) ??
+              successes[0];
+            if (!best) throw new Error(`All ${modelList.length} models failed`);
+            result = best.res;
+            sourceLabel = `openrouter/all(${successes.length}/${modelList.length}) → ${best.model}`;
           } else {
             try {
               const rr = await extractDateRoundRobin(
@@ -997,7 +1041,9 @@ export function ReceiptApp() {
             ),
           );
           processed++;
-          recordAnalysis(r.id, r.name, result.meta, result, undefined, activePrompt);
+          if (!sourceLabel.startsWith("openrouter/all")) {
+            recordAnalysis(r.id, r.name, result.meta, result, undefined, activePrompt);
+          }
           pushLog({
             category: "third-party",
             level: "info",
@@ -1950,6 +1996,21 @@ export function ReceiptApp() {
                   <p className="text-[11px] text-muted-foreground">
                     Pick from the list or type any OpenRouter model slug (e.g. append <code>:free</code>).
                   </p>
+                  <label className="flex items-start gap-2 rounded-md border bg-muted/40 p-2 text-xs cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={queryAllModels}
+                      onChange={(e) => setQueryAllModels(e.target.checked)}
+                    />
+                    <span>
+                      <span className="font-medium">Query ALL {models.length} listed models in parallel</span>
+                      <span className="block text-[10px] text-muted-foreground mt-0.5">
+                        For each image, fire one request per listed model concurrently (spreads across your OpenRouter keys). Best ISO-dated response wins; every attempt is logged in the Analysis report. Use to survive flaky/failing free models.
+                      </span>
+                    </span>
+                  </label>
+
                   <div className="space-y-1 border-t pt-2">
                     <div className="flex items-center justify-between">
                       <Label className="text-xs">AI prompt</Label>
