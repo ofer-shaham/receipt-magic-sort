@@ -1041,7 +1041,9 @@ export function ReceiptApp() {
             ),
           );
           processed++;
-          recordAnalysis(r.id, r.name, result.meta, result, undefined, activePrompt);
+          if (!sourceLabel.startsWith("openrouter/all")) {
+            recordAnalysis(r.id, r.name, result.meta, result, undefined, activePrompt);
+          }
           pushLog({
             category: "third-party",
             level: "info",
