@@ -1996,6 +1996,21 @@ export function ReceiptApp() {
                   <p className="text-[11px] text-muted-foreground">
                     Pick from the list or type any OpenRouter model slug (e.g. append <code>:free</code>).
                   </p>
+                  <label className="flex items-start gap-2 rounded-md border bg-muted/40 p-2 text-xs cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={queryAllModels}
+                      onChange={(e) => setQueryAllModels(e.target.checked)}
+                    />
+                    <span>
+                      <span className="font-medium">Query ALL {models.length} listed models in parallel</span>
+                      <span className="block text-[10px] text-muted-foreground mt-0.5">
+                        For each image, fire one request per listed model concurrently (spreads across your OpenRouter keys). Best ISO-dated response wins; every attempt is logged in the Analysis report. Use to survive flaky/failing free models.
+                      </span>
+                    </span>
+                  </label>
+
                   <div className="space-y-1 border-t pt-2">
                     <div className="flex items-center justify-between">
                       <Label className="text-xs">AI prompt</Label>
