@@ -1913,8 +1913,9 @@ export function ReceiptApp() {
                 <AccordionContent className="space-y-2">
                   <div className="flex gap-2">
                     <select
-                      value={model}
+                      value={models.includes(model) ? model : "__custom__"}
                       onChange={(e) => {
+                        if (e.target.value === "__custom__") return;
                         setModel(e.target.value);
                         localStorage.setItem(MODEL_STORAGE, e.target.value);
                       }}
@@ -1925,14 +1926,29 @@ export function ReceiptApp() {
                           {m}
                         </option>
                       ))}
+                      {!models.includes(model) && (
+                        <option value="__custom__">{model} (custom)</option>
+                      )}
                     </select>
                     <Button size="sm" variant="outline" onClick={refreshModels} disabled={modelsLoading}>
                       {modelsLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
                       <span className="ml-1">Fetch free</span>
                     </Button>
                   </div>
+                  <div className="flex items-center gap-2">
+                    <Label className="text-xs whitespace-nowrap">Model slug</Label>
+                    <Input
+                      value={model}
+                      onChange={(e) => {
+                        setModel(e.target.value);
+                        localStorage.setItem(MODEL_STORAGE, e.target.value);
+                      }}
+                      placeholder="vendor/model[:free]"
+                      className="h-8 text-xs font-mono"
+                    />
+                  </div>
                   <p className="text-[11px] text-muted-foreground">
-                    Lists active vision-capable models with max_price=0.
+                    Pick from the list or type any OpenRouter model slug (e.g. append <code>:free</code>).
                   </p>
                   <div className="space-y-1 border-t pt-2">
                     <div className="flex items-center justify-between">
