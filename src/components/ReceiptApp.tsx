@@ -930,6 +930,48 @@ export function ReceiptApp() {
               settings.geminiModel || "gemini-2.0-flash",
               { prompt: activePrompt, signal: abort.signal },
             );
+          } else if (queryAllModels && models.length > 1) {
+            const modelList = models.slice();
+            const outcomes = await Promise.all(
+              modelList.map(async (m, i) => {
+                const key = apiKeys[i % apiKeys.length];
+                try {
+                  const res = await extractDateWithAI(key, r.compressed!.dataUrl, m, {
+                    prompt: activePrompt,
+                    signal: abort.signal,
+                  });
+                  recordAnalysis(r.id, r.name, res.meta, res, undefined, activePrompt);
+                  return { ok: true as const, model: m, res };
+                } catch (err) {
+                  const msg = (err as Error).message;
+                  recordAnalysis(
+                    r.id,
+                    r.name,
+                    { provider: "openrouter", model: m, latencyMs: 0, rawText: "" },
+                    null,
+                    msg,
+                    activePrompt,
+                  );
+                  pushLog({
+                    category: "third-party",
+                    level: "warn",
+                    source: `openrouter/${m}`,
+                    message: `${r.name}: ${msg}`,
+                  });
+                  return { ok: false as const, model: m, err: msg };
+                }
+              }),
+            );
+            const successes = outcomes.filter((o) => o.ok) as Array<
+              Extract<(typeof outcomes)[number], { ok: true }>
+            >;
+            const best =
+              successes.find((s) => s.res.iso) ??
+              successes.find((s) => s.res.raw) ??
+              successes[0];
+            if (!best) throw new Error(`All ${modelList.length} models failed`);
+            result = best.res;
+            sourceLabel = `openrouter/all(${successes.length}/${modelList.length}) → ${best.model}`;
           } else {
             try {
               const rr = await extractDateRoundRobin(
