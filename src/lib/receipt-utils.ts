@@ -249,7 +249,11 @@ export async function fetchFreeVisionModelsList(): Promise<string[]> {
       m?.short_name;
     if (typeof slug === "string" && slug.length) slugs.push(slug);
   }
-  return Array.from(new Set(slugs));
+  // Filter out non-vision "safety/guard/moderation/embedding" models that
+  // sometimes leak into image-input listings and always return
+  // "No endpoints found" or refuse image reasoning.
+  const BAD = /(safety|guard|moderation|shield|embed|rerank|tts|whisper|speech)/i;
+  return Array.from(new Set(slugs)).filter((s) => !BAD.test(s));
 }
 
 // Normalized bounding box (0..1) around a receipt in the original image.
