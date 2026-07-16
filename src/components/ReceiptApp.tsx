@@ -1084,6 +1084,7 @@ export function ReceiptApp() {
             source: `openrouter/${model}`,
             message: `${r.name}: ${msg}`,
           });
+          if (isDeadModel(msg)) pruneModel(model);
           setReceipts((prev) =>
             prev.map((x) => (x.id === r.id ? { ...x, aiState: "error" } : x)),
           );
