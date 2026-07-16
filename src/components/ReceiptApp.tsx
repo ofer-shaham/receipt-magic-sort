@@ -6,6 +6,7 @@ import {
   cropImageRegion,
   estimateCertainty,
   extractDateRoundRobin,
+  extractDateWithAI,
   extractImagesFromArchive,
   fetchFreeVisionModelsList,
   fetchOpenRouterCredits,
