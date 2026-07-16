@@ -888,6 +888,21 @@ export function ReceiptApp() {
     const activePrompt = customPrompt.trim() || RECEIPT_PROMPT;
     let queueIdx = 0;
 
+    const isDeadModel = (msg: string) =>
+      /no endpoints found|not a valid model|model.*not found|no allowed providers|is not available/i.test(
+        msg,
+      );
+    const pruneModel = (m: string) => {
+      setModels((prev) => {
+        const next = prev.filter((x) => x !== m);
+        if (m === model) {
+          const fallback = next[0] ?? FREE_VISION_MODELS[0];
+          setModel(fallback);
+        }
+        return next.length ? next : [...FREE_VISION_MODELS];
+      });
+    };
+
     const processOne = async () => {
       while (true) {
         if (abort.signal.aborted) break;
