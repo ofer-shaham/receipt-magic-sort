@@ -288,42 +288,25 @@ export const RECEIPT_PROMPT =
 
 export function parseReceiptDatesText(txt: string): AIDateResult {
   const trimmed = (txt ?? "").trim();
-  if (!trimmed || /^NONE/i.test(trimmed)) return { iso: null, raw: null, dates: [] };
-  const normalize = (obj: any): AIDateEntry => {
-    const iso =
-      typeof obj?.iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(obj.iso)
-        ? obj.iso
-        : null;
-    const raw = typeof obj?.raw === "string" ? obj.raw : null;
-    let bbox: BBox | null = null;
-    const b = obj?.bbox;
-    if (b && typeof b === "object") {
-      const nx = Number(b.x), ny = Number(b.y), nw = Number(b.w), nh = Number(b.h);
-      if ([nx, ny, nw, nh].every((v) => Number.isFinite(v) && v >= 0 && v <= 1)) {
-        bbox = { x: nx, y: ny, w: Math.min(nw, 1 - nx), h: Math.min(nh, 1 - ny) };
-      }
-    }
-    return { iso, raw: raw ?? iso, bbox };
-  };
-  const objMatch = trimmed.match(/\{[\s\S]*\}/);
+  if (!trimmed) return { iso: null, raw: null, dates: [] };
+
+  // Primary path: extract the first JSON object and read its "iso" field.
+  const objMatch = trimmed.match(/\{[\s\S]*?\}/);
   if (objMatch) {
     try {
       const obj = JSON.parse(objMatch[0]);
-      if (Array.isArray(obj?.dates) && obj.dates.length) {
-        const dates: AIDateEntry[] = obj.dates
-          .map(normalize)
-          .filter((d: AIDateEntry) => d.iso || d.raw);
-        if (dates.length)
-          return { iso: dates[0].iso, raw: dates[0].raw, dates };
-      }
-      if (obj?.iso || obj?.raw) {
-        const single = normalize(obj);
-        return { iso: single.iso, raw: single.raw, dates: [single] };
-      }
+      const iso =
+        typeof obj?.iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(obj.iso)
+          ? obj.iso
+          : null;
+      // {"iso":null} is an explicit "no date found" — return null cleanly.
+      if ("iso" in obj) return { iso, raw: iso, dates: iso ? [{ iso, raw: iso }] : [] };
     } catch {
-      /* ignore */
+      /* fall through to regex fallback */
     }
   }
+
+  // Fallback: model wrapped the answer in prose — scan for an ISO date.
   const iso = trimmed.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? null;
   return { iso, raw: iso, dates: iso ? [{ iso, raw: iso }] : [] };
 }
