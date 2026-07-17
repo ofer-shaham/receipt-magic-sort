@@ -284,7 +284,7 @@ export class InsufficientCreditsError extends Error {
 }
 
 export const RECEIPT_PROMPT =
-  'Receipt photo. Find the date (any format). Reply JSON only: {"iso":"YYYY-MM-DD"} or NONE.';
+  'Receipt photo. Find date (DD/MM/YY order). Reply raw JSON only: {"iso":"YYYY-MM-DD"} or {"iso":null}.';
 
 export function parseReceiptDatesText(txt: string): AIDateResult {
   const trimmed = (txt ?? "").trim();
