@@ -286,6 +286,12 @@ export class InsufficientCreditsError extends Error {
 export const RECEIPT_PROMPT =
   'Receipt photo. Find date (DD/MM/YY order). Reply raw JSON only: {"iso":"YYYY-MM-DD"} or {"iso":null}.';
 
+/** Convert an ISO date string (YYYY-MM-DD) to the display tag format (DD/MM/YYYY). */
+export function fmtTag(iso: string | null | undefined): string {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso ?? "";
+  return `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}`;
+}
+
 export function parseReceiptDatesText(txt: string): AIDateResult {
   const trimmed = (txt ?? "").trim();
   if (!trimmed) return { iso: null, raw: null, dates: [] };

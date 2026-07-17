@@ -17,6 +17,7 @@ import {
   safeSlug,
   timestamp,
   extractDateWithGemini,
+  fmtTag,
   InsufficientCreditsError,
   type AICallMeta,
   type AIDateEntry,
@@ -594,14 +595,14 @@ export function ReceiptApp() {
       for (const r of included) {
         const rot = ((r.rotation ?? 0) % 360 + 360) % 360;
         if (rot === 0) {
-          items.push({ ...r.compressed!, label: r.date || "" });
+          items.push({ ...r.compressed!, label: fmtTag(r.date) });
         } else {
           const rotated = await rotateImageBlob(r.compressed!.blob, rot);
           items.push({
             blob: rotated.blob,
             width: rotated.width,
             height: rotated.height,
-            label: r.date || "",
+            label: fmtTag(r.date),
           });
         }
       }
@@ -2188,7 +2189,7 @@ export function ReceiptApp() {
                               ) : (
                                 <Tag className="h-2.5 w-2.5" />
                               )}
-                              {r.date}
+                              {fmtTag(r.date)}
                             </span>
                           )}
                           {r.date && r.dateSource === "ai" && !r.approved && (
@@ -2439,7 +2440,7 @@ export function ReceiptApp() {
                           ) : (
                             <Tag className="h-2.5 w-2.5" />
                           )}
-                          {r.date || "tag…"}
+                          {fmtTag(r.date) || "tag…"}
                         </button>
                         {r.excluded && (
                           <span className="rounded bg-destructive/80 px-1.5 py-0.5 font-mono text-[10px] text-white">
