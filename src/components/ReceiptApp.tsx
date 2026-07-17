@@ -594,14 +594,14 @@ export function ReceiptApp() {
       for (const r of included) {
         const rot = ((r.rotation ?? 0) % 360 + 360) % 360;
         if (rot === 0) {
-          items.push({ ...r.compressed!, label: r.dateRaw || r.date || "" });
+          items.push({ ...r.compressed!, label: r.date || "" });
         } else {
           const rotated = await rotateImageBlob(r.compressed!.blob, rot);
           items.push({
             blob: rotated.blob,
             width: rotated.width,
             height: rotated.height,
-            label: r.dateRaw || r.date || "",
+            label: r.date || "",
           });
         }
       }
@@ -2188,7 +2188,7 @@ export function ReceiptApp() {
                               ) : (
                                 <Tag className="h-2.5 w-2.5" />
                               )}
-                              {r.dateRaw || r.date}
+                              {r.date}
                             </span>
                           )}
                           {r.date && r.dateSource === "ai" && !r.approved && (
@@ -2439,7 +2439,7 @@ export function ReceiptApp() {
                           ) : (
                             <Tag className="h-2.5 w-2.5" />
                           )}
-                          {r.dateRaw || r.date || "tag…"}
+                          {r.date || "tag…"}
                         </button>
                         {r.excluded && (
                           <span className="rounded bg-destructive/80 px-1.5 py-0.5 font-mono text-[10px] text-white">

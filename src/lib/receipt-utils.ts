@@ -284,7 +284,7 @@ export class InsufficientCreditsError extends Error {
 }
 
 export const RECEIPT_PROMPT =
-  'Receipt photo with date on 3rd line: (ltr order: day,month,year). Reply JSON only: {"iso":"YYYY-MM-DD"} or NONE.';
+  'Receipt photo. Find the date (any format). Reply JSON only: {"iso":"YYYY-MM-DD"} or NONE.';
 
 export function parseReceiptDatesText(txt: string): AIDateResult {
   const trimmed = (txt ?? "").trim();
@@ -349,20 +349,15 @@ export type AICallMeta = {
 export type AIDateResultWithMeta = AIDateResult & { meta: AICallMeta };
 
 // Rough certainty heuristic (0..1) for a date result.
-// Primary signal: a valid ISO date (YYYY-MM-DD). Bonus points for richer
-// responses (DD/MM/YY raw text, bbox) preserved for backward-compat with
-// older cached results that were produced by the verbose prompt.
+// Primary signal: a valid ISO date (YYYY-MM-DD).
 export function estimateCertainty(r: AIDateResult): number {
   if (!r.dates?.length && !r.iso && !r.raw) return 0;
   const first = r.dates?.[0];
   const isoOk = !!(first?.iso || r.iso);
-  const rawOk = !!(first?.raw || r.raw);
-  const dmyOk = rawOk && /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/.test(first?.raw || r.raw || "");
   const bboxOk = !!first?.bbox;
   let score = 0;
-  if (isoOk) score += 0.8;  // ISO alone is the primary confidence signal
-  if (dmyOk) score += 0.1;  // bonus: explicit DD/MM/YY raw (old-prompt responses)
-  if (bboxOk) score += 0.05; // bonus: bbox present (old-prompt responses)
+  if (isoOk) score += 0.9;  // ISO is the primary confidence signal
+  if (bboxOk) score += 0.05; // bonus: bbox present
   if ((r.dates?.length ?? 0) >= 1) score += 0.05;
   return Math.min(1, score);
 }
