@@ -42,6 +42,16 @@ const CURRENT_YEAR = new Date().getFullYear();
 const YEARS = Array.from({ length: 6 }, (_, i) => String(CURRENT_YEAR - i));
 const MONTHS = ["01","02","03","04","05","06","07","08","09","10","11","12"];
 
+/** Six distinct colours for crop rectangles — cycled by index */
+const RECT_COLORS = [
+  { border: "rgba(16,185,129,1)",  bg: "rgba(16,185,129,0.15)"  }, // emerald
+  { border: "rgba(59,130,246,1)",  bg: "rgba(59,130,246,0.15)"  }, // blue
+  { border: "rgba(245,158,11,1)",  bg: "rgba(245,158,11,0.15)"  }, // amber
+  { border: "rgba(244,63,94,1)",   bg: "rgba(244,63,94,0.15)"   }, // rose
+  { border: "rgba(139,92,246,1)",  bg: "rgba(139,92,246,0.15)"  }, // violet
+  { border: "rgba(6,182,212,1)",   bg: "rgba(6,182,212,0.15)"   }, // cyan
+] as const;
+
 type HandleId = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 
 type Rect = BBox & {
@@ -169,11 +179,10 @@ export function CropWizardPanel({
     if ((e.target as HTMLElement).dataset?.role === "rect-body") return;
     const p = toNorm(e);
     if (!p) return;
-    const nextPart = String(rects.length + 1);
     setDrag({
       mode: "drawing",
       rect: { id: uid(), source: "user", x: p.x, y: p.y, w: 0, h: 0,
-              year: fallbackYear, month: fallbackMonth, part: nextPart },
+              year: fallbackYear, month: fallbackMonth, part: "1" },
     });
   };
 
@@ -241,11 +250,10 @@ export function CropWizardPanel({
     setRects((prev) => prev.filter((r) => r.id !== id));
 
   const addFullImage = () => {
-    const nextPart = String(rects.length + 1);
     setRects((prev) => [
       ...prev,
       { id: uid(), source: "user" as const, x: 0, y: 0, w: 1, h: 1,
-        year: fallbackYear, month: fallbackMonth, part: nextPart },
+        year: fallbackYear, month: fallbackMonth, part: "1" },
     ]);
   };
 
@@ -296,28 +304,31 @@ export function CropWizardPanel({
               />
 
               {allRects.map((r, idx) => {
-                const isAI = r.source === "ai";
                 const isDrawing = drag.mode === "drawing" && r.id === drag.rect.id;
-                const borderColor = isAI ? "border-primary" : "border-emerald-500";
-                const bgColor    = isAI ? "bg-primary/10"  : "bg-emerald-500/10";
+                const col = RECT_COLORS[idx % RECT_COLORS.length];
 
                 return (
                   <div
                     key={r.id}
-                    className={`absolute border-2 ${borderColor} ${bgColor}`}
+                    className="absolute"
                     style={{
-                      left:   `${r.x * 100}%`,
-                      top:    `${r.y * 100}%`,
-                      width:  `${r.w * 100}%`,
-                      height: `${r.h * 100}%`,
-                      cursor: isDrawing ? "crosshair" : "move",
-                      zIndex: 10,
+                      left:        `${r.x * 100}%`,
+                      top:         `${r.y * 100}%`,
+                      width:       `${r.w * 100}%`,
+                      height:      `${r.h * 100}%`,
+                      border:      `2px solid ${col.border}`,
+                      background:  col.bg,
+                      cursor:      isDrawing ? "crosshair" : "move",
+                      zIndex:      10,
                     }}
                     data-role="rect-body"
                     onMouseDown={(e) => !isDrawing && onBodyDown(e, r.id)}
                   >
-                    {/* Index label */}
-                    <span className="absolute left-0.5 top-0.5 rounded bg-white/80 px-1 text-[10px] font-bold leading-none text-foreground">
+                    {/* Index label – larger for readability */}
+                    <span
+                      className="absolute left-1 top-1 rounded px-1.5 py-0.5 text-sm font-bold leading-none shadow"
+                      style={{ background: col.border, color: "#fff" }}
+                    >
                       {idx + 1}
                     </span>
 
