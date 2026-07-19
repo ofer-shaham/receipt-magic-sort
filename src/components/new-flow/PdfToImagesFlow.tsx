@@ -1,11 +1,10 @@
 import { useState, useCallback, useRef } from "react";
 import { toast } from "sonner";
-import { CropWizardPanel } from "@/components/CropWizard";
+import { CropWizardPanel, type TaggedCrop } from "@/components/CropWizard";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Scissors, Sparkles, X, FileArchive, Loader2, ChevronUp } from "lucide-react";
+import { Sparkles, X, FileArchive, Loader2, Scissors, ChevronDown, ChevronUp } from "lucide-react";
 import { pdfToStitchedJpeg } from "@/lib/new-flow/pdf-to-image";
 import { parseYearMonthFromFilename } from "@/lib/new-flow/csv-extract";
 import { appendAILog } from "@/lib/new-flow/logging";
@@ -15,17 +14,16 @@ import {
   cropImageRegion,
   fmtTag,
   RECEIPT_PROMPT,
-  type BBox,
   type PdfItem,
 } from "@/lib/receipt-utils";
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ── constants ─────────────────────────────────────────────────────────────────
 
-const CURRENT_YEAR = new Date().getFullYear();
-const YEARS = Array.from({ length: 5 }, (_, i) => String(CURRENT_YEAR - i));
-const MONTHS = ["01","02","03","04","05","06","07","08","09","10","11","12"];
-const CACHE_KEY = "receiptforge-new-date-cache-v1";
-const AI_MODEL = "google/gemini-2.0-flash-lite-001";
+const CACHE_KEY  = "receiptforge-new-date-cache-v1";
+const AI_MODEL   = "google/gemini-2.0-flash-lite-001";
+const CURR_YEAR  = String(new Date().getFullYear());
+
+// ── helpers ───────────────────────────────────────────────────────────────────
 
 function readORKeys(): string[] {
   try {
@@ -54,7 +52,6 @@ async function fileToDataUrl(file: File): Promise<string> {
     r.readAsDataURL(file);
   });
 }
-
 async function imgDimensions(src: string): Promise<{ width: number; height: number }> {
   return new Promise((res) => {
     const i = new Image();
@@ -62,7 +59,6 @@ async function imgDimensions(src: string): Promise<{ width: number; height: numb
     i.src = src;
   });
 }
-
 function triggerDownload(blob: Blob, name: string) {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -70,55 +66,73 @@ function triggerDownload(blob: Blob, name: string) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 15_000);
 }
+const uid = () => Math.random().toString(36).slice(2, 9);
 
-// ── types ─────────────────────────────────────────────────────────────────────
+// ── item model ────────────────────────────────────────────────────────────────
 
-type ImgItem = {
+/** A rendered PDF waiting to be cropped. Crop panel is shown inline. */
+type SourceItem = {
+  kind: "source";
+  id: string;
+  file: File;       // the stitched JPEG rendered from the PDF
+  dataUrl: string;
+  name: string;
+  defaultYear: string;
+  defaultMonth: string;
+  cropOpen: boolean;
+  aiState: "idle" | "loading" | "done" | "error";
+  aiError?: string;
+};
+
+/** A cropped + tagged piece ready for export. */
+type ExtractedItem = {
+  kind: "extracted";
   id: string;
   file: File;
   dataUrl: string;
   name: string;
   year: string;
   month: string;
-  part: string; // default "1"
-  aiState: "idle" | "loading" | "done" | "error";
-  aiError?: string;
+  part: string;
 };
+
+type FlowItem = SourceItem | ExtractedItem;
 
 // ── component ─────────────────────────────────────────────────────────────────
 
 export function PdfToImagesFlow() {
-  const [items, setItems] = useState<ImgItem[]>([]);
+  const [items, setItems]       = useState<FlowItem[]>([]);
   const [rendering, setRendering] = useState(false);
-  const [cropTargetId, setCropTargetId] = useState<string | null>(null);
   const [includePdf, setIncludePdf] = useState(false);
   const [generating, setGenerating] = useState(false);
-  const dropRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const uid = () => Math.random().toString(36).slice(2, 9);
+  // ── add PDFs ────────────────────────────────────────────────────────────────
 
   const addPdfs = useCallback(async (files: File[]) => {
-    const pdfs = files.filter((f) => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"));
+    const pdfs = files.filter(
+      (f) => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"),
+    );
     if (!pdfs.length) { toast.error("Please drop PDF files."); return; }
     setRendering(true);
     const cache = loadDateCache();
-    const newItems: ImgItem[] = [];
+    const newItems: SourceItem[] = [];
     for (const pdf of pdfs) {
       try {
         const stitched = await pdfToStitchedJpeg(pdf);
-        const dataUrl = await fileToDataUrl(stitched);
-        const ck = fileCacheKey(stitched);
-        const cached = cache[ck];
-        const fromFilename = parseYearMonthFromFilename(stitched.name);
+        const dataUrl  = await fileToDataUrl(stitched);
+        const ck       = fileCacheKey(stitched);
+        const cached   = cache[ck];
+        const fromName = parseYearMonthFromFilename(stitched.name);
         newItems.push({
-          id: uid(),
+          kind: "source",
+          id:   uid(),
           file: stitched,
           dataUrl,
           name: stitched.name,
-          year: cached?.year ?? fromFilename.year ?? String(CURRENT_YEAR),
-          month: cached?.month ?? fromFilename.month ?? "01",
-          part: "1",
+          defaultYear:  cached?.year  ?? fromName.year  ?? CURR_YEAR,
+          defaultMonth: cached?.month ?? fromName.month ?? "01",
+          cropOpen: true,   // open the crop panel immediately
           aiState: cached ? "done" : "idle",
         });
       } catch (e: any) {
@@ -129,101 +143,95 @@ export function PdfToImagesFlow() {
     setRendering(false);
   }, []);
 
-  const onDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      addPdfs(Array.from(e.dataTransfer.files));
-    },
-    [addPdfs],
-  );
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    addPdfs(Array.from(e.dataTransfer.files));
+  }, [addPdfs]);
 
-  const updateTag = (id: string, field: "year" | "month" | "part", val: string) =>
-    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, [field]: val } : it)));
-
-  const removeItem = (id: string) => {
-    setItems((prev) => prev.filter((it) => it.id !== id));
-    if (cropTargetId === id) setCropTargetId(null);
-  };
-
-  const toggleCrop = (id: string) =>
-    setCropTargetId((prev) => (prev === id ? null : id));
-
-  const handleCropExtract = useCallback(
-    async (boxes: BBox[], removeOriginal: boolean) => {
-      if (!cropTargetId) return;
-      const original = items.find((it) => it.id === cropTargetId);
-      if (!original) { setCropTargetId(null); return; }
-      const croppedFiles = await Promise.all(
-        boxes.map((box, idx) => cropImageRegion(original.file, box, idx)),
-      );
-      const cache = loadDateCache();
-      const newParts: ImgItem[] = await Promise.all(
-        croppedFiles.map(async (f, idx) => {
-          const dataUrl = await fileToDataUrl(f);
-          const ck = fileCacheKey(f);
-          const cached = cache[ck];
-          return {
-            id: uid(),
-            file: f,
-            dataUrl,
-            name: f.name,
-            year: cached?.year ?? original.year,
-            month: cached?.month ?? original.month,
-            part: String(idx + 1),
-            aiState: (cached ? "done" : "idle") as ImgItem["aiState"],
-          };
-        }),
-      );
-      setItems((prev) => {
-        const idx = prev.findIndex((it) => it.id === cropTargetId);
-        if (idx === -1) return [...prev, ...newParts];
-        const next = [...prev];
-        if (removeOriginal) next.splice(idx, 1, ...newParts);
-        else next.splice(idx + 1, 0, ...newParts);
-        return next;
-      });
-      setCropTargetId(null);
-    },
-    [cropTargetId, items],
-  );
+  // ── AI date extraction ───────────────────────────────────────────────────────
 
   const runAI = useCallback(async (id: string) => {
-    const item = items.find((it) => it.id === id);
+    const item = items.find((it) => it.id === id && it.kind === "source") as SourceItem | undefined;
     if (!item) return;
     const keys = readORKeys();
     if (!keys.length) { toast.error("Add an OpenRouter API key in the Old tab first."); return; }
-    setItems((prev) => prev.map((it) => it.id === id ? { ...it, aiState: "loading" } : it));
+
+    setItems((prev) =>
+      prev.map((it) => it.id === id ? { ...it, aiState: "loading" } as SourceItem : it),
+    );
     try {
       const result = await extractDateWithAI(keys[0], item.dataUrl, AI_MODEL, { prompt: RECEIPT_PROMPT });
-      appendAILog({ ts: Date.now(), filename: item.name, model: AI_MODEL, provider: "openrouter", byteSize: item.file.size, origin: "pdf-to-images" });
-      const year = result.iso ? result.iso.slice(0, 4) : item.year;
-      const month = result.iso ? result.iso.slice(5, 7) : item.month;
+      appendAILog({ ts: Date.now(), filename: item.name, model: AI_MODEL, provider: "openrouter",
+                    byteSize: item.file.size, origin: "pdf-to-images" });
+      const year  = result.iso ? result.iso.slice(0, 4) : item.defaultYear;
+      const month = result.iso ? result.iso.slice(5, 7) : item.defaultMonth;
       const cache = loadDateCache();
       cache[fileCacheKey(item.file)] = { year, month };
       saveDateCache(cache);
-      setItems((prev) => prev.map((it) => it.id === id ? { ...it, year, month, aiState: "done" } : it));
+      setItems((prev) =>
+        prev.map((it) =>
+          it.id === id
+            ? { ...it, defaultYear: year, defaultMonth: month, aiState: "done" } as SourceItem
+            : it,
+        ),
+      );
       if (!result.iso) toast.warning(`No date found in ${item.name}`);
     } catch (e: any) {
-      setItems((prev) => prev.map((it) => it.id === id ? { ...it, aiState: "error", aiError: e?.message ?? "AI error" } : it));
+      setItems((prev) =>
+        prev.map((it) =>
+          it.id === id ? { ...it, aiState: "error", aiError: e?.message ?? "AI error" } as SourceItem : it,
+        ),
+      );
       toast.error(`AI failed for ${item.name}: ${e?.message ?? e}`);
     }
   }, [items]);
 
-  const runBatchAI = useCallback(async () => {
-    const untagged = items.filter((it) => it.aiState === "idle");
-    if (!untagged.length) { toast.info("All images have tags."); return; }
-    for (const item of untagged) await runAI(item.id);
-  }, [items, runAI]);
+  // ── crop extraction ──────────────────────────────────────────────────────────
+
+  const handleExtract = useCallback(
+    async (sourceId: string, crops: TaggedCrop[], removeOriginal: boolean) => {
+      const source = items.find((it) => it.id === sourceId && it.kind === "source") as SourceItem | undefined;
+      if (!source) return;
+
+      const newExtracted: ExtractedItem[] = await Promise.all(
+        crops.map(async (crop, idx) => {
+          const croppedFile = await cropImageRegion(source.file, crop, idx);
+          const dataUrl     = await fileToDataUrl(croppedFile);
+          return {
+            kind: "extracted" as const,
+            id:   uid(),
+            file: croppedFile,
+            dataUrl,
+            name: croppedFile.name,
+            year:  crop.year,
+            month: crop.month,
+            part:  crop.part,
+          };
+        }),
+      );
+
+      setItems((prev) => {
+        const idx = prev.findIndex((it) => it.id === sourceId);
+        if (idx === -1) return [...prev, ...newExtracted];
+        const next = [...prev];
+        if (removeOriginal) next.splice(idx, 1, ...newExtracted);
+        else next.splice(idx + 1, 0, ...newExtracted);
+        return next;
+      });
+    },
+    [items],
+  );
+
+  // ── generate ─────────────────────────────────────────────────────────────────
 
   const handleGenerate = useCallback(async () => {
-    if (!items.length) { toast.error("No images to export."); return; }
-    const untagged = items.filter((it) => !it.year || !it.month);
-    if (untagged.length) { toast.error("All images must have a year and month."); return; }
+    const extracted = items.filter((it): it is ExtractedItem => it.kind === "extracted");
+    if (!extracted.length) { toast.error("No extracted images to export. Crop and extract from each PDF first."); return; }
     setGenerating(true);
     try {
       const JSZip = (await import("jszip")).default;
-      const zip = new JSZip();
-      for (const it of items) {
+      const zip   = new JSZip();
+      for (const it of extracted) {
         const renamedName = `${it.year}-${it.month}.part${it.part}.${it.name}`;
         zip.file(renamedName, await it.file.arrayBuffer());
       }
@@ -232,17 +240,17 @@ export function PdfToImagesFlow() {
 
       if (includePdf) {
         const pdfItems: PdfItem[] = await Promise.all(
-          items.map(async (it) => {
+          extracted.map(async (it) => {
             const dims = await imgDimensions(it.dataUrl);
-            const iso = `${it.year}-${it.month}-01`;
-            return { blob: it.file, width: dims.width, height: dims.height, label: `${fmtTag(iso)} p.${it.part}` };
+            const iso  = `${it.year}-${it.month}-01`;
+            return { blob: it.file, width: dims.width, height: dims.height,
+                     label: `${fmtTag(iso)} p.${it.part}` };
           }),
         );
-        const maxBytes = 10 * 1024 * 1024;
-        const parts = await buildPdfsWithLimit(pdfItems, maxBytes, { showLabel: true });
-        parts.forEach((p, i) => {
-          triggerDownload(new Blob([p], { type: "application/pdf" }), `receipts-part${i + 1}.pdf`);
-        });
+        const parts = await buildPdfsWithLimit(pdfItems, 10 * 1024 * 1024, { showLabel: true });
+        parts.forEach((p, i) =>
+          triggerDownload(new Blob([p], { type: "application/pdf" }), `receipts-part${i + 1}.pdf`),
+        );
       }
       toast.success("Files generated!");
     } catch (e: any) {
@@ -251,11 +259,28 @@ export function PdfToImagesFlow() {
     setGenerating(false);
   }, [items, includePdf]);
 
+  // ── helpers ──────────────────────────────────────────────────────────────────
+
+  const toggleCrop = (id: string) =>
+    setItems((prev) =>
+      prev.map((it) =>
+        it.id === id && it.kind === "source"
+          ? { ...it, cropOpen: !it.cropOpen }
+          : it,
+      ),
+    );
+
+  const removeItem = (id: string) =>
+    setItems((prev) => prev.filter((it) => it.id !== id));
+
+  const extractedCount = items.filter((it) => it.kind === "extracted").length;
+
+  // ── render ────────────────────────────────────────────────────────────────────
+
   return (
     <div className="space-y-6 p-4">
       {/* Drop zone */}
       <div
-        ref={dropRef}
         onClick={() => inputRef.current?.click()}
         onDrop={onDrop}
         onDragOver={(e) => e.preventDefault()}
@@ -274,132 +299,114 @@ export function PdfToImagesFlow() {
         />
       </div>
 
-      {/* Image list */}
+      {/* Items */}
       {items.length > 0 && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">{items.length} image{items.length !== 1 ? "s" : ""}</span>
-            <Button size="sm" variant="outline" onClick={runBatchAI}>
-              <Sparkles className="mr-1 h-3.5 w-3.5" />
-              Analyse all (AI)
-            </Button>
-          </div>
-
-          <div className="space-y-2">
-            {items.map((item) => {
-              const isCropping = cropTargetId === item.id;
+        <div className="space-y-3">
+          {items.map((item) => {
+            // ── Extracted (compact) ──
+            if (item.kind === "extracted") {
               return (
-                <div key={item.id} className="rounded-lg border border-border">
-                  {/* Item row */}
-                  <div className="flex gap-3 p-3">
-                    {/* Thumbnail */}
-                    <img
-                      src={item.dataUrl}
-                      alt={item.name}
-                      className="h-20 w-16 flex-shrink-0 rounded object-cover"
-                    />
-                    {/* Controls */}
-                    <div className="flex flex-1 flex-col gap-2">
-                      <p className="truncate text-xs font-medium text-foreground" title={item.name}>{item.name}</p>
-                      <div className="flex flex-wrap items-center gap-2">
-                        {/* Year */}
-                        <Select value={item.year} onValueChange={(v) => updateTag(item.id, "year", v)}>
-                          <SelectTrigger className="h-7 w-24 text-xs"><SelectValue /></SelectTrigger>
-                          <SelectContent>{YEARS.map((y) => <SelectItem key={y} value={y}>{y}</SelectItem>)}</SelectContent>
-                        </Select>
-                        {/* Month */}
-                        <Select value={item.month} onValueChange={(v) => updateTag(item.id, "month", v)}>
-                          <SelectTrigger className="h-7 w-16 text-xs"><SelectValue /></SelectTrigger>
-                          <SelectContent>{MONTHS.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}</SelectContent>
-                        </Select>
-                        {/* Part */}
-                        <div className="flex items-center gap-1">
-                          <span className="text-xs text-muted-foreground">p.</span>
-                          <input
-                            type="number"
-                            min={1}
-                            max={99}
-                            value={item.part}
-                            onChange={(e) => {
-                              const v = String(Math.max(1, Math.min(99, Number(e.target.value) || 1)));
-                              updateTag(item.id, "part", v);
-                            }}
-                            className="h-7 w-14 rounded-md border border-input bg-background px-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-                          />
-                        </div>
-                        {/* Crop toggle */}
-                        <Button
-                          size="sm"
-                          variant={isCropping ? "default" : "outline"}
-                          className="h-7 text-xs"
-                          onClick={() => toggleCrop(item.id)}
-                        >
-                          {isCropping
-                            ? <><ChevronUp className="mr-1 h-3 w-3" />Close crop</>
-                            : <><Scissors className="mr-1 h-3 w-3" />Crop</>}
-                        </Button>
-                        {/* AI */}
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 text-xs"
-                          onClick={() => runAI(item.id)}
-                          disabled={item.aiState === "loading"}
-                        >
-                          {item.aiState === "loading"
-                            ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                            : <Sparkles className="mr-1 h-3 w-3" />}
-                          Image analysis
-                        </Button>
-                        {item.aiState === "error" && (
-                          <span className="text-xs text-destructive" title={item.aiError}>⚠ AI error</span>
-                        )}
-                        {/* Remove */}
-                        <Button size="icon" variant="ghost" className="ml-auto h-7 w-7" onClick={() => removeItem(item.id)}>
-                          <X className="h-3.5 w-3.5" />
-                        </Button>
-                      </div>
-                      <p className="text-[10px] text-muted-foreground">
-                        Tag: {item.year}-{item.month} p.{item.part} → {fmtTag(`${item.year}-${item.month}-01`)} part {item.part}
-                      </p>
-                    </div>
+                <div key={item.id}
+                  className="flex items-center gap-3 rounded-lg border border-border bg-muted/20 px-3 py-2">
+                  <img src={item.dataUrl} alt={item.name}
+                    className="h-12 w-10 flex-shrink-0 rounded object-cover" />
+                  <div className="flex-1 min-w-0">
+                    <p className="truncate text-xs font-medium" title={item.name}>{item.name}</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {fmtTag(`${item.year}-${item.month}-01`)} · p.{item.part}
+                    </p>
                   </div>
-
-                  {/* Inline crop panel */}
-                  {isCropping && (
-                    <div className="border-t border-border bg-muted/10 p-4">
-                      <div className="mb-2 flex items-center gap-2">
-                        <Scissors className="h-4 w-4 text-primary" />
-                        <span className="text-sm font-medium">Crop receipts from image</span>
-                      </div>
-                      <CropWizardPanel
-                        imageSrc={item.dataUrl}
-                        imageName={item.name}
-                        onExtract={handleCropExtract}
-                        onCancel={() => setCropTargetId(null)}
-                      />
-                    </div>
-                  )}
+                  <Button size="icon" variant="ghost" className="h-7 w-7 flex-shrink-0"
+                    onClick={() => removeItem(item.id)}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
                 </div>
               );
-            })}
-          </div>
+            }
 
-          {/* Generate */}
-          <div className="flex flex-wrap items-center gap-4 rounded-lg border border-border bg-muted/30 p-4">
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="include-pdf"
-                checked={includePdf}
-                onCheckedChange={(v) => setIncludePdf(!!v)}
-              />
-              <Label htmlFor="include-pdf" className="text-sm">Also build PDF</Label>
+            // ── Source (crop panel) ──
+            return (
+              <div key={item.id} className="rounded-lg border border-border">
+                {/* Header row */}
+                <div className="flex items-center gap-3 p-3">
+                  <img src={item.dataUrl} alt={item.name}
+                    className="h-14 w-11 flex-shrink-0 rounded object-cover" />
+                  <div className="flex flex-1 flex-col gap-1.5 min-w-0">
+                    <p className="truncate text-xs font-medium" title={item.name}>{item.name}</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {/* AI button */}
+                      <Button size="sm" variant="outline" className="h-7 text-xs"
+                        onClick={() => runAI(item.id)}
+                        disabled={item.aiState === "loading"}>
+                        {item.aiState === "loading"
+                          ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                          : <Sparkles className="mr-1 h-3 w-3" />}
+                        {item.aiState === "done" ? "Re-analyse" : "AI date"}
+                      </Button>
+                      {item.aiState === "done" && (
+                        <span className="text-[11px] text-muted-foreground">
+                          {fmtTag(`${item.defaultYear}-${item.defaultMonth}-01`)}
+                        </span>
+                      )}
+                      {item.aiState === "error" && (
+                        <span className="text-xs text-destructive" title={item.aiError}>⚠ AI error</span>
+                      )}
+                      {/* Crop toggle */}
+                      <Button size="sm"
+                        variant={item.cropOpen ? "default" : "outline"}
+                        className="ml-auto h-7 text-xs"
+                        onClick={() => toggleCrop(item.id)}>
+                        <Scissors className="mr-1 h-3 w-3" />
+                        {item.cropOpen
+                          ? <><ChevronUp className="ml-0.5 h-3 w-3" />Close</>
+                          : <><ChevronDown className="ml-0.5 h-3 w-3" />Crop</>}
+                      </Button>
+                      {/* Remove */}
+                      <Button size="icon" variant="ghost" className="h-7 w-7"
+                        onClick={() => removeItem(item.id)}>
+                        <X className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Inline crop panel */}
+                {item.cropOpen && (
+                  <div className="border-t border-border p-4">
+                    <CropWizardPanel
+                      imageSrc={item.dataUrl}
+                      imageName={item.name}
+                      showTagInputs
+                      defaultYear={item.defaultYear}
+                      defaultMonth={item.defaultMonth}
+                      onTaggedExtract={(crops, removeOriginal) =>
+                        handleExtract(item.id, crops, removeOriginal)
+                      }
+                      onCancel={() => toggleCrop(item.id)}
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Generate bar */}
+          {extractedCount > 0 && (
+            <div className="flex flex-wrap items-center gap-4 rounded-lg border border-border bg-muted/30 p-4">
+              <span className="text-sm text-muted-foreground">
+                {extractedCount} image{extractedCount !== 1 ? "s" : ""} ready
+              </span>
+              <div className="flex items-center gap-2">
+                <Checkbox id="include-pdf" checked={includePdf}
+                  onCheckedChange={(v) => setIncludePdf(!!v)} />
+                <Label htmlFor="include-pdf" className="text-sm">Also build PDF</Label>
+              </div>
+              <Button onClick={handleGenerate} disabled={generating} className="ml-auto">
+                {generating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Generate files
+              </Button>
             </div>
-            <Button onClick={handleGenerate} disabled={generating}>
-              {generating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Generate files
-            </Button>
-          </div>
+          )}
         </div>
       )}
     </div>
