@@ -1,19 +1,20 @@
-import * as pdfjsLib from "pdfjs-dist";
-
-// Point the worker at the bundled copy so Vite can resolve it at build time.
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  "pdfjs-dist/build/pdf.worker.min.mjs",
-  import.meta.url,
-).href;
-
 /**
  * Render every page of a PDF file into a single vertically-stitched JPEG.
- * The returned File is named `<original-basename>.jpg`.
+ * pdfjs-dist is imported lazily so the module can be evaluated in SSR
+ * (which lacks DOMMatrix / canvas) without throwing.
  */
 export async function pdfToStitchedJpeg(
   file: File,
   dpi = 150,
 ): Promise<File> {
+  const pdfjsLib = await import("pdfjs-dist");
+
+  // Point the worker at the bundled copy so Vite can resolve it at build time.
+  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+    "pdfjs-dist/build/pdf.worker.min.mjs",
+    import.meta.url,
+  ).href;
+
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   const scale = dpi / 72; // PDF points are 72 dpi

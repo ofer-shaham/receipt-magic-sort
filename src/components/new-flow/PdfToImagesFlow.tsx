@@ -1,11 +1,11 @@
 import { useState, useCallback, useRef } from "react";
 import { toast } from "sonner";
-import { CropWizard } from "@/components/CropWizard";
+import { CropWizardPanel } from "@/components/CropWizard";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Scissors, Sparkles, X, FileArchive, Loader2 } from "lucide-react";
+import { Scissors, Sparkles, X, FileArchive, Loader2, ChevronUp } from "lucide-react";
 import { pdfToStitchedJpeg } from "@/lib/new-flow/pdf-to-image";
 import { parseYearMonthFromFilename } from "@/lib/new-flow/csv-extract";
 import { appendAILog } from "@/lib/new-flow/logging";
@@ -23,9 +23,7 @@ import {
 
 const CURRENT_YEAR = new Date().getFullYear();
 const YEARS = Array.from({ length: 5 }, (_, i) => String(CURRENT_YEAR - i));
-const MONTHS = [
-  "01","02","03","04","05","06","07","08","09","10","11","12",
-];
+const MONTHS = ["01","02","03","04","05","06","07","08","09","10","11","12"];
 const CACHE_KEY = "receiptforge-new-date-cache-v1";
 const AI_MODEL = "google/gemini-2.0-flash-lite-001";
 
@@ -82,6 +80,7 @@ type ImgItem = {
   name: string;
   year: string;
   month: string;
+  part: string; // default "1"
   aiState: "idle" | "loading" | "done" | "error";
   aiError?: string;
 };
@@ -91,7 +90,7 @@ type ImgItem = {
 export function PdfToImagesFlow() {
   const [items, setItems] = useState<ImgItem[]>([]);
   const [rendering, setRendering] = useState(false);
-  const [cropTarget, setCropTarget] = useState<{ id: string; src: string; name: string } | null>(null);
+  const [cropTargetId, setCropTargetId] = useState<string | null>(null);
   const [includePdf, setIncludePdf] = useState(false);
   const [generating, setGenerating] = useState(false);
   const dropRef = useRef<HTMLDivElement>(null);
@@ -119,6 +118,7 @@ export function PdfToImagesFlow() {
           name: stitched.name,
           year: cached?.year ?? fromFilename.year ?? String(CURRENT_YEAR),
           month: cached?.month ?? fromFilename.month ?? "01",
+          part: "1",
           aiState: cached ? "done" : "idle",
         });
       } catch (e: any) {
@@ -137,26 +137,28 @@ export function PdfToImagesFlow() {
     [addPdfs],
   );
 
-  const updateTag = (id: string, field: "year" | "month", val: string) =>
+  const updateTag = (id: string, field: "year" | "month" | "part", val: string) =>
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, [field]: val } : it)));
 
-  const removeItem = (id: string) =>
+  const removeItem = (id: string) => {
     setItems((prev) => prev.filter((it) => it.id !== id));
+    if (cropTargetId === id) setCropTargetId(null);
+  };
 
-  const openCrop = (item: ImgItem) =>
-    setCropTarget({ id: item.id, src: item.dataUrl, name: item.name });
+  const toggleCrop = (id: string) =>
+    setCropTargetId((prev) => (prev === id ? null : id));
 
   const handleCropExtract = useCallback(
     async (boxes: BBox[], removeOriginal: boolean) => {
-      if (!cropTarget) return;
-      const original = items.find((it) => it.id === cropTarget.id);
-      if (!original) { setCropTarget(null); return; }
+      if (!cropTargetId) return;
+      const original = items.find((it) => it.id === cropTargetId);
+      if (!original) { setCropTargetId(null); return; }
       const croppedFiles = await Promise.all(
         boxes.map((box, idx) => cropImageRegion(original.file, box, idx)),
       );
       const cache = loadDateCache();
       const newParts: ImgItem[] = await Promise.all(
-        croppedFiles.map(async (f) => {
+        croppedFiles.map(async (f, idx) => {
           const dataUrl = await fileToDataUrl(f);
           const ck = fileCacheKey(f);
           const cached = cache[ck];
@@ -167,21 +169,22 @@ export function PdfToImagesFlow() {
             name: f.name,
             year: cached?.year ?? original.year,
             month: cached?.month ?? original.month,
+            part: String(idx + 1),
             aiState: (cached ? "done" : "idle") as ImgItem["aiState"],
           };
         }),
       );
       setItems((prev) => {
-        const idx = prev.findIndex((it) => it.id === cropTarget.id);
+        const idx = prev.findIndex((it) => it.id === cropTargetId);
         if (idx === -1) return [...prev, ...newParts];
         const next = [...prev];
         if (removeOriginal) next.splice(idx, 1, ...newParts);
         else next.splice(idx + 1, 0, ...newParts);
         return next;
       });
-      setCropTarget(null);
+      setCropTargetId(null);
     },
-    [cropTarget, items],
+    [cropTargetId, items],
   );
 
   const runAI = useCallback(async (id: string) => {
@@ -218,23 +221,21 @@ export function PdfToImagesFlow() {
     if (untagged.length) { toast.error("All images must have a year and month."); return; }
     setGenerating(true);
     try {
-      // Build ZIP
       const JSZip = (await import("jszip")).default;
       const zip = new JSZip();
       for (const it of items) {
-        const renamedName = `${it.year}-${it.month}.${it.name}`;
+        const renamedName = `${it.year}-${it.month}.part${it.part}.${it.name}`;
         zip.file(renamedName, await it.file.arrayBuffer());
       }
       const zipBlob = await zip.generateAsync({ type: "blob" });
       triggerDownload(zipBlob, `receiptforge-${Date.now()}.zip`);
 
-      // Optional PDF
       if (includePdf) {
         const pdfItems: PdfItem[] = await Promise.all(
           items.map(async (it) => {
             const dims = await imgDimensions(it.dataUrl);
             const iso = `${it.year}-${it.month}-01`;
-            return { blob: it.file, width: dims.width, height: dims.height, label: fmtTag(iso) };
+            return { blob: it.file, width: dims.width, height: dims.height, label: `${fmtTag(iso)} p.${it.part}` };
           }),
         );
         const maxBytes = 10 * 1024 * 1024;
@@ -284,60 +285,104 @@ export function PdfToImagesFlow() {
             </Button>
           </div>
 
-          <div className="space-y-3">
-            {items.map((item) => (
-              <div key={item.id} className="flex gap-3 rounded-lg border border-border p-3">
-                {/* Thumbnail */}
-                <img
-                  src={item.dataUrl}
-                  alt={item.name}
-                  className="h-20 w-16 flex-shrink-0 rounded object-cover"
-                />
-                {/* Controls */}
-                <div className="flex flex-1 flex-col gap-2">
-                  <p className="truncate text-xs font-medium text-foreground" title={item.name}>{item.name}</p>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {/* Year */}
-                    <Select value={item.year} onValueChange={(v) => updateTag(item.id, "year", v)}>
-                      <SelectTrigger className="h-7 w-24 text-xs"><SelectValue /></SelectTrigger>
-                      <SelectContent>{YEARS.map((y) => <SelectItem key={y} value={y}>{y}</SelectItem>)}</SelectContent>
-                    </Select>
-                    {/* Month */}
-                    <Select value={item.month} onValueChange={(v) => updateTag(item.id, "month", v)}>
-                      <SelectTrigger className="h-7 w-16 text-xs"><SelectValue /></SelectTrigger>
-                      <SelectContent>{MONTHS.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}</SelectContent>
-                    </Select>
-                    {/* Crop */}
-                    <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => openCrop(item)}>
-                      <Scissors className="mr-1 h-3 w-3" />Crop
-                    </Button>
-                    {/* AI */}
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 text-xs"
-                      onClick={() => runAI(item.id)}
-                      disabled={item.aiState === "loading"}
-                    >
-                      {item.aiState === "loading"
-                        ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                        : <Sparkles className="mr-1 h-3 w-3" />}
-                      Image analysis
-                    </Button>
-                    {item.aiState === "error" && (
-                      <span className="text-xs text-destructive" title={item.aiError}>⚠ AI error</span>
-                    )}
-                    {/* Remove */}
-                    <Button size="icon" variant="ghost" className="ml-auto h-7 w-7" onClick={() => removeItem(item.id)}>
-                      <X className="h-3.5 w-3.5" />
-                    </Button>
+          <div className="space-y-2">
+            {items.map((item) => {
+              const isCropping = cropTargetId === item.id;
+              return (
+                <div key={item.id} className="rounded-lg border border-border">
+                  {/* Item row */}
+                  <div className="flex gap-3 p-3">
+                    {/* Thumbnail */}
+                    <img
+                      src={item.dataUrl}
+                      alt={item.name}
+                      className="h-20 w-16 flex-shrink-0 rounded object-cover"
+                    />
+                    {/* Controls */}
+                    <div className="flex flex-1 flex-col gap-2">
+                      <p className="truncate text-xs font-medium text-foreground" title={item.name}>{item.name}</p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {/* Year */}
+                        <Select value={item.year} onValueChange={(v) => updateTag(item.id, "year", v)}>
+                          <SelectTrigger className="h-7 w-24 text-xs"><SelectValue /></SelectTrigger>
+                          <SelectContent>{YEARS.map((y) => <SelectItem key={y} value={y}>{y}</SelectItem>)}</SelectContent>
+                        </Select>
+                        {/* Month */}
+                        <Select value={item.month} onValueChange={(v) => updateTag(item.id, "month", v)}>
+                          <SelectTrigger className="h-7 w-16 text-xs"><SelectValue /></SelectTrigger>
+                          <SelectContent>{MONTHS.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}</SelectContent>
+                        </Select>
+                        {/* Part */}
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-muted-foreground">p.</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={99}
+                            value={item.part}
+                            onChange={(e) => {
+                              const v = String(Math.max(1, Math.min(99, Number(e.target.value) || 1)));
+                              updateTag(item.id, "part", v);
+                            }}
+                            className="h-7 w-14 rounded-md border border-input bg-background px-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                          />
+                        </div>
+                        {/* Crop toggle */}
+                        <Button
+                          size="sm"
+                          variant={isCropping ? "default" : "outline"}
+                          className="h-7 text-xs"
+                          onClick={() => toggleCrop(item.id)}
+                        >
+                          {isCropping
+                            ? <><ChevronUp className="mr-1 h-3 w-3" />Close crop</>
+                            : <><Scissors className="mr-1 h-3 w-3" />Crop</>}
+                        </Button>
+                        {/* AI */}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs"
+                          onClick={() => runAI(item.id)}
+                          disabled={item.aiState === "loading"}
+                        >
+                          {item.aiState === "loading"
+                            ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                            : <Sparkles className="mr-1 h-3 w-3" />}
+                          Image analysis
+                        </Button>
+                        {item.aiState === "error" && (
+                          <span className="text-xs text-destructive" title={item.aiError}>⚠ AI error</span>
+                        )}
+                        {/* Remove */}
+                        <Button size="icon" variant="ghost" className="ml-auto h-7 w-7" onClick={() => removeItem(item.id)}>
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground">
+                        Tag: {item.year}-{item.month} p.{item.part} → {fmtTag(`${item.year}-${item.month}-01`)} part {item.part}
+                      </p>
+                    </div>
                   </div>
-                  <p className="text-[10px] text-muted-foreground">
-                    Tag: {item.year}-{item.month} → {fmtTag(`${item.year}-${item.month}-01`)}
-                  </p>
+
+                  {/* Inline crop panel */}
+                  {isCropping && (
+                    <div className="border-t border-border bg-muted/10 p-4">
+                      <div className="mb-2 flex items-center gap-2">
+                        <Scissors className="h-4 w-4 text-primary" />
+                        <span className="text-sm font-medium">Crop receipts from image</span>
+                      </div>
+                      <CropWizardPanel
+                        imageSrc={item.dataUrl}
+                        imageName={item.name}
+                        onExtract={handleCropExtract}
+                        onCancel={() => setCropTargetId(null)}
+                      />
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Generate */}
@@ -357,15 +402,6 @@ export function PdfToImagesFlow() {
           </div>
         </div>
       )}
-
-      {/* CropWizard */}
-      <CropWizard
-        open={!!cropTarget}
-        onOpenChange={(open) => { if (!open) setCropTarget(null); }}
-        imageSrc={cropTarget?.src ?? null}
-        imageName={cropTarget?.name ?? ""}
-        onExtract={handleCropExtract}
-      />
     </div>
   );
 }
