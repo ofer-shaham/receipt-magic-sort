@@ -9,38 +9,96 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as OldRouteImport } from './routes/old'
+import { Route as NewRouteImport } from './routes/new'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as NewPdfToImagesRouteImport } from './routes/new.pdf-to-images'
+import { Route as NewImagesToCsvRouteImport } from './routes/new.images-to-csv'
 
+const OldRoute = OldRouteImport.update({
+  id: '/old',
+  path: '/old',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const NewRoute = NewRouteImport.update({
+  id: '/new',
+  path: '/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const NewPdfToImagesRoute = NewPdfToImagesRouteImport.update({
+  id: '/pdf-to-images',
+  path: '/pdf-to-images',
+  getParentRoute: () => NewRoute,
+} as any)
+const NewImagesToCsvRoute = NewImagesToCsvRouteImport.update({
+  id: '/images-to-csv',
+  path: '/images-to-csv',
+  getParentRoute: () => NewRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/new': typeof NewRouteWithChildren
+  '/old': typeof OldRoute
+  '/new/images-to-csv': typeof NewImagesToCsvRoute
+  '/new/pdf-to-images': typeof NewPdfToImagesRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/new': typeof NewRouteWithChildren
+  '/old': typeof OldRoute
+  '/new/images-to-csv': typeof NewImagesToCsvRoute
+  '/new/pdf-to-images': typeof NewPdfToImagesRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/new': typeof NewRouteWithChildren
+  '/old': typeof OldRoute
+  '/new/images-to-csv': typeof NewImagesToCsvRoute
+  '/new/pdf-to-images': typeof NewPdfToImagesRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths: '/' | '/new' | '/old' | '/new/images-to-csv' | '/new/pdf-to-images'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/' | '/new' | '/old' | '/new/images-to-csv' | '/new/pdf-to-images'
+  id:
+    | '__root__'
+    | '/'
+    | '/new'
+    | '/old'
+    | '/new/images-to-csv'
+    | '/new/pdf-to-images'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  NewRoute: typeof NewRouteWithChildren
+  OldRoute: typeof OldRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/old': {
+      id: '/old'
+      path: '/old'
+      fullPath: '/old'
+      preLoaderRoute: typeof OldRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/new': {
+      id: '/new'
+      path: '/new'
+      fullPath: '/new'
+      preLoaderRoute: typeof NewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
@@ -48,11 +106,39 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/new/pdf-to-images': {
+      id: '/new/pdf-to-images'
+      path: '/pdf-to-images'
+      fullPath: '/new/pdf-to-images'
+      preLoaderRoute: typeof NewPdfToImagesRouteImport
+      parentRoute: typeof NewRoute
+    }
+    '/new/images-to-csv': {
+      id: '/new/images-to-csv'
+      path: '/images-to-csv'
+      fullPath: '/new/images-to-csv'
+      preLoaderRoute: typeof NewImagesToCsvRouteImport
+      parentRoute: typeof NewRoute
+    }
   }
 }
 
+interface NewRouteChildren {
+  NewImagesToCsvRoute: typeof NewImagesToCsvRoute
+  NewPdfToImagesRoute: typeof NewPdfToImagesRoute
+}
+
+const NewRouteChildren: NewRouteChildren = {
+  NewImagesToCsvRoute: NewImagesToCsvRoute,
+  NewPdfToImagesRoute: NewPdfToImagesRoute,
+}
+
+const NewRouteWithChildren = NewRoute._addFileChildren(NewRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  NewRoute: NewRouteWithChildren,
+  OldRoute: OldRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

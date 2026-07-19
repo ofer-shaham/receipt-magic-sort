@@ -1,0 +1,110 @@
+# Overview
+
+Add a top-level tab system without touching the existing app. The current `ReceiptApp` stays untouched at `/old`. Two new flows live under `/new/*`. Every AI request stays behind an explicit "Image analysis" button and is logged.
+
+## Routes
+
+- `/` — redirect to `/old`.
+- `/old` — mounts existing `ReceiptApp` **unchanged**.
+- `/new` — layout route: sub-tab bar + `<Outlet />`, redirects to `/new/pdf-to-images` when hit directly.
+- `/new/pdf-to-images` — Flow 1 (priority): PDFs → tagged images → generated files.
+- `/new/images-to-csv` — Flow 2: image archive → tagged images → per-image CSV extraction.
+
+Top nav in `src/routes/__root.tsx`: Old / New. Sub-tab bar on the `/new` layout: PDF → Images / Images → CSV.
+
+---
+
+## Flow 1 — `/new/pdf-to-images`
+
+1. **Upload**
+   - Drag/drop `.pdf`.
+   - Each PDF is rendered into a single tall stitched JPEG using `pdfjs-dist` (default 150 DPI).
+   - Original PDF blobs are discarded after rendering.
+
+2. **Crop**
+   - Reuse the existing `CropWizard` to split each stitched image into individual receipts (`<parent>.part.<id>.jpg`).
+   - Explicit user action.
+
+3. **Tag**
+   - Year + Month dropdowns (last 5 years).
+   - **Tagging is determined from the image filename** (using the same parsing logic based on `year`, `month`, and `part` naming conventions).
+   - Auto-tag on ingest from filename.
+   - localStorage cache lookup by `filename::size`.
+   - Optional per-image and batch **"Image analysis"** buttons are the **only** path that sends image bytes to an AI provider.
+   - Every AI call is logged (timestamp, filename, model, provider, byte size, origin) into the existing logs store with category `ai-request`.
+
+4. **Generate files**
+   - **Generate files** button creates a ZIP containing all images renamed using their tags:
+
+     ```
+     <year>-<month>.<parent>.part.<id>.jpg
+     ```
+
+   - Optional **"Also build PDF"** checkbox passes the tagged image set directly to the existing `buildPdfsWithLimit` in `receipt-utils.ts` without modification.
+
+---
+
+## Flow 2 — `/new/images-to-csv`
+
+1. **Upload**
+   - Drag/drop an **images archive** (ZIP) containing JPG/PNG files.
+   - Archive is extracted client-side.
+   - **No PDF handling in this flow.**
+
+2. **Tag**
+   - Images use the **same tagging logic as Flow 1**, deriving Year/Month/Part from the image filename.
+   - Auto-tag on ingest using filename parsing.
+   - localStorage cache lookup by `filename::size`.
+   - Optional per-image and batch **"Image analysis"** buttons use the same AI gating and logging as Flow 1.
+
+3. **Shared columns**
+   - Optional textarea (comma-separated) passed as a hint to every image extraction prompt.
+
+4. **Per-image extraction**
+   - Explicit **"Extract table"** button per image (plus batch button).
+   - Results stored as `{ columns, rows }` in localStorage keyed by `filename::size`.
+
+5. **Table view**
+   - Editable HTML table displayed beneath each image.
+   - Cell edits persist locally.
+
+6. **Export**
+   - Each image has its own **"Download CSV"** button.
+   - Generates:
+
+     ```
+     <image-base>.<timestamp>.csv
+     ```
+
+   - **No merged CSV export.**
+
+---
+
+State for both new flows lives under its own localStorage namespace (`receiptforge-new-v1`), isolated from the Old tab.
+
+## Files added
+
+- `src/routes/old.tsx` — mounts existing `ReceiptApp` + `Toaster`.
+- `src/routes/new.tsx` — layout with sub-tab bar + `<Outlet />`; `beforeLoad` redirects bare `/new` to `/new/pdf-to-images`.
+- `src/routes/new.pdf-to-images.tsx` — Flow 1 page.
+- `src/routes/new.images-to-csv.tsx` — Flow 2 page.
+- `src/components/new-flow/TopTabs.tsx` — Old/New tab bar.
+- `src/components/new-flow/PdfToImagesFlow.tsx` — uploader + crop + tag + AI gate + generate UI.
+- `src/components/new-flow/ImagesToCsvFlow.tsx` — archive upload + tagging + shared columns + extraction + editable table + per-image CSV export.
+- `src/components/new-flow/CsvTable.tsx` — editable table + per-image CSV export helper.
+- `src/lib/new-flow/pdf-to-image.ts` — PDF → stitched JPEG (adds `pdfjs-dist` via `bun add`).
+- `src/lib/new-flow/csv-extract.ts` — AI table extraction; reuses provider clients from `receipt-utils.ts` with its own model config.
+- `src/lib/new-flow/logging.ts` — writes `ai-request` entries into the existing logs store.
+
+## Files touched
+
+- `src/routes/index.tsx` — replaced with `beforeLoad` redirect to `/old`.
+- `src/routes/__root.tsx` — render `<TopTabs />` above `<Outlet />`; refresh generic head metadata.
+
+## Not changed
+
+- `src/components/ReceiptApp.tsx`
+- `src/lib/receipt-utils.ts`
+- `CropWizard.tsx`
+- `ImagePreviewDialog.tsx`
+- Every existing Old-tab setting.

@@ -1,26 +1,7 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { ReceiptApp } from "@/components/ReceiptApp";
-import { Toaster } from "@/components/ui/sonner";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/")({
-  head: () => ({
-    meta: [
-      { title: "ReceiptForge — Compress, sort & export receipts to PDF" },
-      {
-        name: "description",
-        content:
-          "Upload receipts, control compression, auto-extract dates with AI, and export a single optimized PDF.",
-      },
-    ],
-  }),
-  component: Index,
+  beforeLoad: () => {
+    throw redirect({ to: "/old" });
+  },
 });
-
-function Index() {
-  return (
-    <>
-      <ReceiptApp />
-      <Toaster />
-    </>
-  );
-}
