@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Trash2, Scissors, Sparkles, SquareDashed } from "lucide-react";
+import { Trash2, Scissors, Sparkles, SquareDashed, Loader2 } from "lucide-react";
 import type { BBox } from "@/lib/receipt-utils";
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -34,6 +34,8 @@ export type CropWizardPanelProps = {
   onTaggedExtract?: (crops: TaggedCrop[], removeOriginal: boolean) => void;
   onCancel?: () => void;
   showRemoveOriginal?: boolean;
+  /** Called once the image has loaded with its natural pixel dimensions */
+  onImageLoad?: (w: number, h: number) => void;
 };
 
 // ── Internal types ────────────────────────────────────────────────────────────
@@ -64,10 +66,14 @@ type Rect = BBox & {
 
 type DragMode =
   | { mode: "idle" }
-  | { mode: "drawing"; rect: Rect }
+  | { mode: "drawing"; rect: Rect; startX: number; startY: number }
   | { mode: "adjusting"; rectId: string; handle: HandleId | "body"; startMouse: { x: number; y: number }; startRect: Rect };
 
 const uid = () => Math.random().toString(36).slice(2, 9);
+
+// Minimum size fractions — very small so nearly any gesture registers
+const MIN_W = 0.008;
+const MIN_H = 0.004;
 
 // 8 resize handles: position + cursor
 const HANDLES: { id: HandleId; style: React.CSSProperties; cursor: string }[] = [
@@ -86,7 +92,7 @@ function applyDrag(
   handle: HandleId | "body",
   delta: { dx: number; dy: number },
 ): Rect {
-  const MIN = 0.02;
+  const MIN = MIN_W;
   let { x, y, w, h } = startRect;
   const { dx, dy } = delta;
 
@@ -103,7 +109,7 @@ function applyDrag(
   }
 
   w = Math.max(MIN, w);
-  h = Math.max(MIN, h);
+  h = Math.max(MIN_H, h);
   x = Math.max(0, Math.min(1 - w, x));
   y = Math.max(0, Math.min(1 - h, y));
 
@@ -123,12 +129,18 @@ export function CropWizardPanel({
   onTaggedExtract,
   onCancel,
   showRemoveOriginal = true,
+  onImageLoad,
 }: CropWizardPanelProps) {
   const imgRef = useRef<HTMLImageElement>(null);
   const [rects, setRects] = useState<Rect[]>([]);
   const [drag, setDrag] = useState<DragMode>({ mode: "idle" });
   const [removeOriginal, setRemoveOriginal] = useState(true);
   const [useAISuggestions, setUseAISuggestions] = useState(true);
+  const [imgLoaded, setImgLoaded] = useState(false);
+
+  // Keep a ref to drag for stable window event handlers
+  const dragRef = useRef(drag);
+  dragRef.current = drag;
 
   const fallbackYear  = defaultYear  ?? String(CURRENT_YEAR);
   const fallbackMonth = defaultMonth ?? "01";
@@ -160,72 +172,91 @@ export function CropWizardPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultYear, defaultMonth]);
 
+  // Reset loaded state when image source changes
+  useEffect(() => {
+    setImgLoaded(false);
+  }, [imageSrc]);
+
   // ── coordinate helpers ──────────────────────────────────────────────────────
 
-  const toNorm = (e: React.MouseEvent): { x: number; y: number } | null => {
+  // Stable norm function using a ref so window event handlers don't go stale
+  const normFn = useCallback((clientX: number, clientY: number): { x: number; y: number } | null => {
     const el = imgRef.current;
     if (!el) return null;
     const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return null;
     return {
-      x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
-      y: Math.max(0, Math.min(1, (e.clientY - r.top)  / r.height)),
+      x: Math.max(0, Math.min(1, (clientX - r.left) / r.width)),
+      y: Math.max(0, Math.min(1, (clientY - r.top)  / r.height)),
     };
-  };
+  }, []);
 
-  // ── container events ────────────────────────────────────────────────────────
+  // ── global window mouse events (catches mouseup outside container) ──────────
+
+  useEffect(() => {
+    const handleMove = (e: MouseEvent) => {
+      const p = normFn(e.clientX, e.clientY);
+      if (!p) return;
+      const d = dragRef.current;
+
+      if (d.mode === "drawing") {
+        setDrag({
+          ...d,
+          rect: {
+            ...d.rect,
+            x: Math.min(d.startX, p.x),
+            y: Math.min(d.startY, p.y),
+            w: Math.abs(p.x - d.startX),
+            h: Math.abs(p.y - d.startY),
+          },
+        });
+      } else if (d.mode === "adjusting") {
+        const dx = p.x - d.startMouse.x;
+        const dy = p.y - d.startMouse.y;
+        const updated = applyDrag(d.startRect, d.handle, { dx, dy });
+        setRects((prev) => prev.map((r) => (r.id === d.rectId ? updated : r)));
+      }
+    };
+
+    const handleUp = () => {
+      const d = dragRef.current;
+      if (d.mode === "drawing") {
+        if (d.rect.w > MIN_W && d.rect.h > MIN_H) {
+          setRects((prev) => [...prev, d.rect]);
+        }
+      }
+      setDrag({ mode: "idle" });
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup",   handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup",   handleUp);
+    };
+  }, [normFn]);
+
+  // ── container mousedown ─────────────────────────────────────────────────────
 
   const onContainerDown = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).dataset?.role === "rect-handle") return;
     if ((e.target as HTMLElement).dataset?.role === "rect-body") return;
-    const p = toNorm(e);
+    const p = normFn(e.clientX, e.clientY);
     if (!p) return;
     setDrag({
       mode: "drawing",
       rect: { id: uid(), source: "user", x: p.x, y: p.y, w: 0, h: 0,
               year: fallbackYear, month: fallbackMonth, part: "1" },
+      startX: p.x,
+      startY: p.y,
     });
-  };
-
-  const onContainerMove = (e: React.MouseEvent) => {
-    const p = toNorm(e);
-    if (!p) return;
-
-    if (drag.mode === "drawing") {
-      const s = { x: drag.rect.x, y: drag.rect.y };
-      setDrag((d) =>
-        d.mode !== "drawing" ? d : {
-          ...d,
-          rect: {
-            ...d.rect,
-            x: Math.min(s.x, p.x),
-            y: Math.min(s.y, p.y),
-            w: Math.abs(p.x - s.x),
-            h: Math.abs(p.y - s.y),
-          },
-        },
-      );
-    } else if (drag.mode === "adjusting") {
-      const dx = p.x - drag.startMouse.x;
-      const dy = p.y - drag.startMouse.y;
-      const updated = applyDrag(drag.startRect, drag.handle, { dx, dy });
-      setRects((prev) => prev.map((r) => (r.id === drag.rectId ? updated : r)));
-    }
-  };
-
-  const onContainerUp = () => {
-    if (drag.mode === "drawing") {
-      if (drag.rect.w > 0.02 && drag.rect.h > 0.02) {
-        setRects((prev) => [...prev, drag.rect]);
-      }
-    }
-    setDrag({ mode: "idle" });
   };
 
   // ── rect-level events ───────────────────────────────────────────────────────
 
   const onBodyDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    const p = toNorm(e);
+    const p = normFn(e.clientX, e.clientY);
     if (!p) return;
     const rect = rects.find((r) => r.id === id);
     if (!rect) return;
@@ -234,7 +265,7 @@ export function CropWizardPanel({
 
   const onHandleDown = (e: React.MouseEvent, id: string, handle: HandleId) => {
     e.stopPropagation();
-    const p = toNorm(e);
+    const p = normFn(e.clientX, e.clientY);
     if (!p) return;
     const rect = rects.find((r) => r.id === id);
     if (!rect) return;
@@ -286,24 +317,34 @@ export function CropWizardPanel({
       <div className="grid gap-3 lg:grid-cols-[1.6fr_1fr]">
         {/* Canvas */}
         <div className="relative select-none overflow-auto rounded-md border bg-muted/20">
-          {imageSrc && (
+          {imageSrc ? (
             <div
               className="relative inline-block w-full"
               style={{ cursor: drag.mode === "adjusting" && drag.handle === "body" ? "grabbing" : "crosshair" }}
               onMouseDown={onContainerDown}
-              onMouseMove={onContainerMove}
-              onMouseUp={onContainerUp}
-              onMouseLeave={onContainerUp}
             >
+              {/* Loading overlay */}
+              {!imgLoaded && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-muted/40 z-20">
+                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                  <span className="text-xs text-muted-foreground">Loading image…</span>
+                </div>
+              )}
               <img
                 ref={imgRef}
                 src={imageSrc}
                 alt={imageName}
                 draggable={false}
                 className="block w-full"
+                onLoad={() => {
+                  setImgLoaded(true);
+                  if (imgRef.current) {
+                    onImageLoad?.(imgRef.current.naturalWidth, imgRef.current.naturalHeight);
+                  }
+                }}
               />
 
-              {allRects.map((r, idx) => {
+              {imgLoaded && allRects.map((r, idx) => {
                 const isDrawing = drag.mode === "drawing" && r.id === drag.rect.id;
                 const col = RECT_COLORS[idx % RECT_COLORS.length];
 
@@ -324,7 +365,7 @@ export function CropWizardPanel({
                     data-role="rect-body"
                     onMouseDown={(e) => !isDrawing && onBodyDown(e, r.id)}
                   >
-                    {/* Index label – larger for readability */}
+                    {/* Index label */}
                     <span
                       className="absolute left-1 top-1 rounded px-1.5 py-0.5 text-sm font-bold leading-none shadow"
                       style={{ background: col.border, color: "#fff" }}
@@ -345,6 +386,10 @@ export function CropWizardPanel({
                   </div>
                 );
               })}
+            </div>
+          ) : (
+            <div className="flex h-40 items-center justify-center text-xs text-muted-foreground">
+              No image selected
             </div>
           )}
         </div>

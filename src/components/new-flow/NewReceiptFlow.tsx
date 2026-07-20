@@ -3,13 +3,18 @@
  *
  * Internal tabs:
  *   • Crop & Tag — upload images/PDFs/ZIPs → multi-crop → tagged preview grid → export ZIP
- *   • Image → CSV — upload table images → AI extract → editable table → export CSV / batch ZIP
+ *   • Image → CSV — upload table images (or use cropped images) → AI extract → editable table → export CSV / batch ZIP
  *
  * State lives in AppStoreProvider (root) so it survives /old ↔ /new navigation.
  */
 import { useCallback, useRef, useState } from "react";
 import { toast } from "sonner";
-import { useAppStore, type StoreTaggedItem, type StoreCsvItem } from "@/contexts/AppStore";
+import {
+  useAppStore,
+  type StoreTaggedItem,
+  type StoreCsvItem,
+  DEFAULT_COLUMNS_HINT,
+} from "@/contexts/AppStore";
 import { CropModal } from "@/components/CropModal";
 import { CsvTable } from "@/components/new-flow/CsvTable";
 import { Button } from "@/components/ui/button";
@@ -20,13 +25,13 @@ import {
 } from "@/components/ui/select";
 import {
   ImageIcon, FileArchive, FileText, Loader2, X, Scissors, Eye,
-  Download, Pencil, Check, Sparkles, TableProperties,
+  Download, Pencil, Check, Sparkles, TableProperties, Plus, ChevronDown, ChevronUp,
 } from "lucide-react";
 import type { TaggedCrop } from "@/components/CropWizard";
 import { pdfToStitchedJpeg } from "@/lib/new-flow/pdf-to-image";
 import { extractTableFromImage, toCsv } from "@/lib/new-flow/csv-extract";
 import { appendAILog } from "@/lib/new-flow/logging";
-import { cropImageRegion, extractImagesFromArchive, fmtTag } from "@/lib/receipt-utils";
+import { cropImageRegion, extractImagesFromArchive } from "@/lib/receipt-utils";
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
@@ -34,7 +39,22 @@ const CURR_YEAR   = String(new Date().getFullYear());
 const YEARS       = Array.from({ length: 6 }, (_, i) => String(Number(CURR_YEAR) - i));
 const MONTHS      = ["01","02","03","04","05","06","07","08","09","10","11","12"];
 const TAG_CACHE_K = "receiptforge-new-tags-v1";
-const CSV_MODEL   = "google/gemini-2.0-flash-lite-001";
+
+// ── Year-based thumbnail colors (modulo) ─────────────────────────────────────
+
+const YEAR_PALETTE = [
+  { border: "#10b981", bg: "rgba(16,185,129,0.12)"  }, // emerald  → e.g. 2024
+  { border: "#3b82f6", bg: "rgba(59,130,246,0.12)"  }, // blue     → e.g. 2023
+  { border: "#f59e0b", bg: "rgba(245,158,11,0.12)"  }, // amber    → e.g. 2022
+  { border: "#f43f5e", bg: "rgba(244,63,94,0.12)"   }, // rose     → e.g. 2021
+  { border: "#8b5cf6", bg: "rgba(139,92,246,0.12)"  }, // violet   → e.g. 2020
+  { border: "#06b6d4", bg: "rgba(6,182,212,0.12)"   }, // cyan     → e.g. 2019
+] as const;
+
+function yearPalette(year: string) {
+  const y = parseInt(year, 10) || 2024;
+  return YEAR_PALETTE[y % YEAR_PALETTE.length];
+}
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -48,7 +68,7 @@ function saveTagCache(c: Record<string, { year: string; month: string; part: str
   try { localStorage.setItem(TAG_CACHE_K, JSON.stringify(c)); } catch { /* ignore */ }
 }
 function readORModel() {
-  return localStorage.getItem("openrouter-model") || CSV_MODEL;
+  return localStorage.getItem("openrouter-model") || "google/gemini-2.0-flash-lite-001";
 }
 function readORKeys(): string[] {
   try {
@@ -83,15 +103,27 @@ const isPDF     = (f: File) => f.type === "application/pdf" || /\.pdf$/i.test(f.
 const isArchive = (f: File) => /\.zip$/i.test(f.name) || f.type === "application/zip"
                              || f.type === "application/x-zip-compressed";
 
+/** Parse year + month from a filename, e.g. "2023-02", "02_2023", "2023_02" */
+function parseYMFromName(name: string): { year: string; month: string } {
+  // YYYY-MM or YYYY_MM
+  const m1 = name.match(/(\d{4})[-_](\d{2})/);
+  if (m1) return { year: m1[1], month: m1[2] };
+  // MM-YYYY or MM_YYYY
+  const m2 = name.match(/(\d{2})[-_](\d{4})/);
+  if (m2) return { year: m2[2], month: m2[1] };
+  return { year: CURR_YEAR, month: "01" };
+}
+
 // ── crop-modal state type ────────────────────────────────────────────────────
 
 type CropCtx = {
   imageSrc:      string;
   imageName:     string;
-  sourceId?:     string;   // source item to remove on extract
-  taggedId?:     string;   // tagged item to replace on extract
+  sourceId?:     string;
+  taggedId?:     string;
   defaultYear?:  string;
   defaultMonth?: string;
+  pageCount?:    number;
 };
 
 // ── inline tab button ─────────────────────────────────────────────────────────
@@ -123,18 +155,22 @@ export function NewReceiptFlow() {
     sources, setSources,
     tagged, setTagged,
     csvItems, setCsvItems,
+    csvColumnsHint, setCsvColumnsHint,
     newTab, setNewTab,
   } = useAppStore();
 
   // ── local UI state ──────────────────────────────────────────────────────────
-  const [cropCtx,      setCropCtx]      = useState<CropCtx | null>(null);
-  const [pdfPreview,   setPdfPreview]   = useState<string | null>(null);
-  const [pdfBusy,      setPdfBusy]      = useState<string | null>(null); // id of PDF being rendered
-  const [selectedId,   setSelectedId]   = useState<string | null>(null);
-  const [loading,      setLoading]      = useState(false);
-  const [exporting,    setExporting]    = useState(false);
-  const [csvExporting, setCsvExporting] = useState(false);
-  const [columnsHint,  setColumnsHint]  = useState("");
+  const [cropCtx,        setCropCtx]        = useState<CropCtx | null>(null);
+  const [pdfPreview,     setPdfPreview]     = useState<string | null>(null);
+  const [pdfBusy,        setPdfBusy]        = useState<string | null>(null);
+  const [pdfProgress,    setPdfProgress]    = useState<{ cur: number; total: number } | null>(null);
+  const [selectedId,     setSelectedId]     = useState<string | null>(null);
+  const [loading,        setLoading]        = useState(false);
+  const [exporting,      setExporting]      = useState(false);
+  const [csvExporting,   setCsvExporting]   = useState(false);
+  const [csvPreviewUrl,  setCsvPreviewUrl]  = useState<string | null>(null);
+  const [selectedCsvIds, setSelectedCsvIds] = useState<Set<string>>(new Set());
+  const [showTaggedBank, setShowTaggedBank] = useState(true);
 
   const cropInputRef = useRef<HTMLInputElement>(null);
   const csvInputRef  = useRef<HTMLInputElement>(null);
@@ -146,9 +182,9 @@ export function NewReceiptFlow() {
     const cache = loadTagCache();
 
     const processImage = async (img: File) => {
-      const key    = ck(img);
+      const key     = ck(img);
       const dataUrl = await fileToDataUrl(img);
-      const hit    = cache[key];
+      const hit     = cache[key];
       if (hit) {
         setTagged((p) => [...p, {
           kind: "tagged", id: uid(), file: img, dataUrl,
@@ -187,28 +223,40 @@ export function NewReceiptFlow() {
 
   const handlePdfCrop = useCallback(async (pdfId: string, pdfFile: File) => {
     setPdfBusy(pdfId);
+    setPdfProgress(null);
     try {
-      const stitched = await pdfToStitchedJpeg(pdfFile);
-      const dataUrl  = await fileToDataUrl(stitched);
-      const srcId    = uid();
+      const { file: stitched, pageCount } = await pdfToStitchedJpeg(
+        pdfFile,
+        150,
+        (cur, total) => setPdfProgress({ cur, total }),
+      );
+      const dataUrl = await fileToDataUrl(stitched);
+      const srcId   = uid();
       setSources((p) => [...p, { kind: "source", id: srcId, file: stitched, dataUrl, name: stitched.name }]);
       setPdfs((p) => p.filter((x) => x.id !== pdfId));
-      setCropCtx({ imageSrc: dataUrl, imageName: stitched.name, sourceId: srcId });
+      setCropCtx({ imageSrc: dataUrl, imageName: stitched.name, sourceId: srcId, pageCount });
     } catch (e: any) {
       toast.error(`PDF render failed: ${e?.message ?? e}`);
     }
     setPdfBusy(null);
+    setPdfProgress(null);
   }, [setSources, setPdfs]);
 
   const handlePdfPreview = useCallback(async (pdfId: string, pdfFile: File) => {
     setPdfBusy(pdfId);
+    setPdfProgress(null);
     try {
-      const stitched = await pdfToStitchedJpeg(pdfFile);
+      const { file: stitched } = await pdfToStitchedJpeg(
+        pdfFile,
+        150,
+        (cur, total) => setPdfProgress({ cur, total }),
+      );
       setPdfPreview(await fileToDataUrl(stitched));
     } catch (e: any) {
       toast.error(`PDF preview failed: ${e?.message ?? e}`);
     }
     setPdfBusy(null);
+    setPdfProgress(null);
   }, []);
 
   // ── crop modal extract ──────────────────────────────────────────────────────
@@ -216,7 +264,6 @@ export function NewReceiptFlow() {
   const handleCropExtract = useCallback(async (crops: TaggedCrop[], removeOriginal: boolean) => {
     if (!cropCtx) return;
 
-    // Resolve the source file
     const srcFile =
       cropCtx.sourceId ? sources.find((s) => s.id === cropCtx.sourceId)?.file
       : cropCtx.taggedId ? tagged.find((t) => t.id === cropCtx.taggedId)?.file
@@ -241,17 +288,20 @@ export function NewReceiptFlow() {
 
     saveTagCache(cache);
 
-    if (removeOriginal) {
-      if (cropCtx.sourceId) setSources((p) => p.filter((s) => s.id !== cropCtx.sourceId));
-      if (cropCtx.taggedId) {
-        setTagged((p) => p.filter((t) => t.id !== cropCtx.taggedId));
-        if (selectedId === cropCtx.taggedId) setSelectedId(null);
-      }
+    // Atomically remove old + add new (avoid double setTagged)
+    const removedId = removeOriginal ? cropCtx.taggedId : undefined;
+    setTagged((p) => {
+      const filtered = removedId ? p.filter((t) => t.id !== removedId) : p;
+      return [...filtered, ...newTagged];
+    });
+    if (removedId) setSelectedId((id) => id === removedId ? null : id);
+
+    if (removeOriginal && cropCtx.sourceId) {
+      setSources((p) => p.filter((s) => s.id !== cropCtx.sourceId));
     }
 
-    setTagged((p) => [...p, ...newTagged]);
     setCropCtx(null);
-  }, [cropCtx, sources, tagged, selectedId, setSources, setTagged]);
+  }, [cropCtx, sources, tagged, setSources, setTagged]);
 
   // ── tag editing ─────────────────────────────────────────────────────────────
 
@@ -274,6 +324,7 @@ export function NewReceiptFlow() {
   };
 
   // ── export ZIP (images) ─────────────────────────────────────────────────────
+  // Export name format: {month}_{year}__{part}.jpeg
 
   const exportZip = useCallback(async () => {
     if (!tagged.length) return;
@@ -281,15 +332,17 @@ export function NewReceiptFlow() {
     try {
       const JSZip = (await import("jszip")).default;
       const zip   = new JSZip();
-      const cache = loadTagCache();
+      const seen  = new Map<string, number>();
 
       for (const it of tagged) {
-        const renamed = `${it.year}-${it.month}.part${it.part}.${it.name}`;
+        // Canonical name: MM_YYYY__part.jpeg
+        const base    = `${it.month}_${it.year}__${it.part}`;
+        const count   = seen.get(base) ?? 0;
+        const renamed = count === 0 ? `${base}.jpeg` : `${base}__${count + 1}.jpeg`;
+        seen.set(base, count + 1);
         zip.file(renamed, await it.file.arrayBuffer());
-        cache[`${renamed}::${it.file.size}`] = { year: it.year, month: it.month, part: it.part };
       }
 
-      saveTagCache(cache);
       const blob = await zip.generateAsync({ type: "blob" });
       triggerDownload(blob, `receipts-${Date.now()}.zip`);
       toast.success(`Exported ${tagged.length} image${tagged.length !== 1 ? "s" : ""}.`);
@@ -301,28 +354,27 @@ export function NewReceiptFlow() {
 
   // ── CSV section: file ingestion ─────────────────────────────────────────────
 
+  const makeCsvItem = (file: File, dataUrl: string, overrideYM?: { year: string; month: string }): StoreCsvItem => {
+    const { year, month } = overrideYM ?? parseYMFromName(file.name);
+    return {
+      id: uid(), file, dataUrl, name: file.name,
+      year, month, part: "1", ck: ck(file),
+      extraction: null, editedRows: null, extractState: "idle",
+    };
+  };
+
   const addCsvFiles = useCallback(async (rawFiles: File[]) => {
     setLoading(true);
     for (const file of rawFiles) {
       try {
         if (isImage(file)) {
           const dataUrl = await fileToDataUrl(file);
-          const key = ck(file);
-          setCsvItems((p) => [...p, {
-            id: uid(), file, dataUrl, name: file.name,
-            year: CURR_YEAR, month: "01", part: "1", ck: key,
-            extraction: null, editedRows: null, extractState: "idle",
-          }]);
+          setCsvItems((p) => [...p, makeCsvItem(file, dataUrl)]);
         } else if (isArchive(file)) {
           const imgs = await extractImagesFromArchive(file);
           for (const img of imgs) {
             const dataUrl = await fileToDataUrl(img);
-            const key = ck(img);
-            setCsvItems((p) => [...p, {
-              id: uid(), file: img, dataUrl, name: img.name,
-              year: CURR_YEAR, month: "01", part: "1", ck: key,
-              extraction: null, editedRows: null, extractState: "idle",
-            }]);
+            setCsvItems((p) => [...p, makeCsvItem(img, dataUrl)]);
           }
         }
       } catch (e: any) {
@@ -337,6 +389,32 @@ export function NewReceiptFlow() {
     addCsvFiles(Array.from(e.dataTransfer.files));
   }, [addCsvFiles]);
 
+  /** Import a tagged (cropped) image directly into the CSV queue */
+  const addTaggedToCsv = useCallback((item: StoreTaggedItem) => {
+    const alreadyIn = csvItems.some((it) => it.ck === item.ck);
+    if (alreadyIn) { toast.info(`${item.name} is already in the CSV queue.`); return; }
+    setCsvItems((p) => [...p, {
+      id: uid(), file: item.file, dataUrl: item.dataUrl, name: item.name,
+      year: item.year, month: item.month, part: item.part, ck: item.ck,
+      extraction: null, editedRows: null, extractState: "idle",
+    }]);
+  }, [csvItems, setCsvItems]);
+
+  const addAllTaggedToCsv = useCallback(() => {
+    const existing = new Set(csvItems.map((it) => it.ck));
+    const toAdd = tagged.filter((t) => !existing.has(t.ck));
+    if (!toAdd.length) { toast.info("All cropped images are already in the CSV queue."); return; }
+    setCsvItems((p) => [
+      ...p,
+      ...toAdd.map((item) => ({
+        id: uid(), file: item.file, dataUrl: item.dataUrl, name: item.name,
+        year: item.year, month: item.month, part: item.part, ck: item.ck,
+        extraction: null, editedRows: null, extractState: "idle" as const,
+      })),
+    ]);
+    toast.success(`Added ${toAdd.length} image${toAdd.length !== 1 ? "s" : ""} to the CSV queue.`);
+  }, [tagged, csvItems, setCsvItems]);
+
   // ── CSV extraction ──────────────────────────────────────────────────────────
 
   const runExtract = useCallback(async (id: string) => {
@@ -344,12 +422,12 @@ export function NewReceiptFlow() {
     if (!item) return;
     const keys = readORKeys();
     if (!keys.length) {
-      toast.error("Add an OpenRouter API key in the AI Settings (⚙ button in the header).");
+      toast.error("Add an OpenRouter API key in AI Settings (footer ⚙ button).");
       return;
     }
     setCsvItems((p) => p.map((it) => it.id === id ? { ...it, extractState: "loading" } : it));
     try {
-      const result = await extractTableFromImage(item.dataUrl, columnsHint);
+      const result = await extractTableFromImage(item.dataUrl, csvColumnsHint);
       const model  = readORModel();
       appendAILog({
         ts: Date.now(), filename: item.name,
@@ -369,26 +447,43 @@ export function NewReceiptFlow() {
       );
       toast.error(`Extract failed for ${item.name}: ${e?.message ?? e}`);
     }
-  }, [csvItems, columnsHint, setCsvItems]);
+  }, [csvItems, csvColumnsHint, setCsvItems]);
 
-  const runBatchExtract = useCallback(async () => {
-    const pending = csvItems.filter((it) => it.extractState === "idle" || it.extractState === "error");
-    if (!pending.length) { toast.info("All images already processed."); return; }
+  const runBatchExtract = useCallback(async (ids?: string[]) => {
+    const pending = csvItems.filter((it) =>
+      (ids ? ids.includes(it.id) : true) && (it.extractState === "idle" || it.extractState === "error"),
+    );
+    if (!pending.length) { toast.info("All selected images already processed."); return; }
     for (const it of pending) await runExtract(it.id);
   }, [csvItems, runExtract]);
 
+  // ── CSV multi-select helpers ────────────────────────────────────────────────
+
+  const toggleCsvSelect = (id: string) =>
+    setSelectedCsvIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+
+  const allCsvSelected = csvItems.length > 0 && csvItems.every((it) => selectedCsvIds.has(it.id));
+  const toggleAllCsv = () => {
+    if (allCsvSelected) setSelectedCsvIds(new Set());
+    else setSelectedCsvIds(new Set(csvItems.map((it) => it.id)));
+  };
+
   // ── CSV export ──────────────────────────────────────────────────────────────
+
+  // Export CSV name: {month}_{year}__{part}.csv
+  const csvExportName = (item: StoreCsvItem) =>
+    `${item.month}_${item.year}__${item.part}.csv`;
 
   const exportSingleCsv = (item: StoreCsvItem) => {
     const columns = item.extraction?.columns ?? [];
     const rows    = item.editedRows ?? item.extraction?.rows ?? [];
     if (!columns.length) { toast.info("Nothing to export yet — run extraction first."); return; }
-    const csv  = toCsv(columns, rows);
-    const base = item.name.replace(/\.[^.]+$/, "");
-    triggerDownload(
-      new Blob([csv], { type: "text/csv" }),
-      `${item.year}-${item.month}.part${item.part}.${base}.csv`,
-    );
+    const csv = toCsv(columns, rows);
+    triggerDownload(new Blob([csv], { type: "text/csv" }), csvExportName(item));
   };
 
   const exportAllCsvZip = useCallback(async () => {
@@ -403,9 +498,7 @@ export function NewReceiptFlow() {
       for (const it of ready) {
         const columns = it.extraction?.columns ?? [];
         const rows    = it.editedRows ?? it.extraction?.rows ?? [];
-        const csv     = toCsv(columns, rows);
-        const base    = it.name.replace(/\.[^.]+$/, "");
-        zip.file(`${it.year}-${it.month}.part${it.part}.${base}.csv`, csv);
+        zip.file(csvExportName(it), toCsv(columns, rows));
       }
       const blob = await zip.generateAsync({ type: "blob" });
       triggerDownload(blob, `tables-${Date.now()}.zip`);
@@ -475,22 +568,28 @@ export function NewReceiptFlow() {
                             {pdf.name}
                           </p>
                           {pdfBusy === pdf.id
-                            ? <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                            ? (
+                              <div className="flex items-center gap-2">
+                                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                                {pdfProgress && (
+                                  <span className="text-xs text-muted-foreground">
+                                    Page {pdfProgress.cur}/{pdfProgress.total}
+                                  </span>
+                                )}
+                              </div>
+                            )
                             : (
                               <div className="flex gap-1">
-                                {/* Preview */}
                                 <Button size="icon" variant="ghost" className="h-7 w-7"
                                   title="Preview PDF"
                                   onClick={() => handlePdfPreview(pdf.id, pdf.file)}>
                                   <Eye className="h-3.5 w-3.5" />
                                 </Button>
-                                {/* Crop */}
                                 <Button size="icon" variant="ghost" className="h-7 w-7"
                                   title="Crop this PDF"
                                   onClick={() => handlePdfCrop(pdf.id, pdf.file)}>
                                   <Scissors className="h-3.5 w-3.5" />
                                 </Button>
-                                {/* Remove */}
                                 <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground"
                                   onClick={() => setPdfs((p) => p.filter((x) => x.id !== pdf.id))}>
                                   <X className="h-3.5 w-3.5" />
@@ -606,33 +705,38 @@ export function NewReceiptFlow() {
                     </div>
                   )}
 
-                  {/* Thumbnail grid */}
+                  {/* Thumbnail grid — colored by year */}
                   <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
                     {tagged.map((item) => {
                       const isSel = item.id === selectedId;
+                      const col   = yearPalette(item.year);
                       return (
                         <div key={item.id}
                           className={`group relative cursor-pointer overflow-hidden rounded-lg border-2 transition-all ${
-                            isSel
-                              ? "border-primary shadow-md"
-                              : "border-border hover:border-primary/50"
+                            isSel ? "shadow-md" : "hover:opacity-90"
                           }`}
+                          style={{
+                            borderColor: isSel ? col.border : `${col.border}88`,
+                            backgroundColor: col.bg,
+                          }}
                           onClick={() => setSelectedId(isSel ? null : item.id)}>
                           <img src={item.dataUrl} alt={item.name}
                             className="aspect-[3/4] w-full object-cover" />
 
                           {/* Tag chip */}
-                          <div className="absolute bottom-0 left-0 right-0 bg-black/65 px-1.5 py-1">
+                          <div className="absolute bottom-0 left-0 right-0 px-1.5 py-1"
+                            style={{ background: `${col.border}cc` }}>
                             <p className="truncate text-[11px] font-semibold leading-tight text-white">
-                              {fmtTag(`${item.year}-${item.month}-01`)}
+                              {item.month}/{item.year}
                             </p>
-                            <p className="text-[10px] leading-tight text-white/75">p.{item.part}</p>
+                            <p className="text-[10px] leading-tight text-white/85">p.{item.part}</p>
                           </div>
 
                           {/* Edit badge */}
                           <div className={`absolute right-1 top-1 rounded-full p-1 shadow transition-opacity ${
-                            isSel ? "bg-primary opacity-100" : "bg-black/50 opacity-0 group-hover:opacity-100"
-                          }`}>
+                            isSel ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                          }`}
+                            style={{ background: col.border }}>
                             <Pencil className="h-2.5 w-2.5 text-white" />
                           </div>
 
@@ -663,8 +767,7 @@ export function NewReceiptFlow() {
                   </div>
 
                   <p className="text-[11px] text-muted-foreground">
-                    Click an image to edit its tag. Hover for scissors to re-crop.
-                    ZIPs automatically restore saved tags on import.
+                    Click an image to edit its tag. Hover for scissors to re-crop. Colors = year.
                   </p>
                 </div>
               )}
@@ -679,12 +782,68 @@ export function NewReceiptFlow() {
       {newTab === "csv" && (
         <div className="flex flex-1 flex-col">
 
-          {/* Drop zone */}
+          {/* ── Cropped images bank ── */}
+          {tagged.length > 0 && (
+            <div className="mx-4 mt-4 rounded-lg border border-border bg-muted/20 p-3">
+              <button
+                className="flex w-full items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+                onClick={() => setShowTaggedBank((v) => !v)}
+              >
+                <ImageIcon className="h-3.5 w-3.5" />
+                Cropped images ({tagged.length})
+                {showTaggedBank ? <ChevronUp className="ml-auto h-3.5 w-3.5" /> : <ChevronDown className="ml-auto h-3.5 w-3.5" />}
+              </button>
+              {showTaggedBank && (
+                <div className="mt-2 space-y-2">
+                  <div className="flex flex-wrap gap-2">
+                    {tagged.map((item) => {
+                      const col      = yearPalette(item.year);
+                      const alreadyIn = csvItems.some((it) => it.ck === item.ck);
+                      return (
+                        <div key={item.id}
+                          className="relative flex h-16 w-14 flex-shrink-0 cursor-pointer flex-col overflow-hidden rounded border-2 transition-all"
+                          style={{ borderColor: col.border, backgroundColor: col.bg }}
+                          title={item.name}
+                          onClick={() => !alreadyIn && addTaggedToCsv(item)}
+                        >
+                          <img src={item.dataUrl} alt={item.name}
+                            className="h-10 w-full object-cover" />
+                          <div className="flex-1 px-0.5 text-center"
+                            style={{ background: `${col.border}bb` }}>
+                            <p className="truncate text-[9px] font-semibold text-white leading-tight">
+                              {item.month}/{item.year}
+                            </p>
+                          </div>
+                          {alreadyIn && (
+                            <div className="absolute inset-0 flex items-center justify-center rounded bg-black/40">
+                              <Check className="h-4 w-4 text-white" />
+                            </div>
+                          )}
+                          {!alreadyIn && (
+                            <div className="absolute right-0.5 top-0.5 rounded-full bg-black/50 p-0.5">
+                              <Plus className="h-2.5 w-2.5 text-white" />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <Button size="sm" variant="outline" className="h-7 text-xs"
+                    onClick={addAllTaggedToCsv}>
+                    <Plus className="mr-1 h-3.5 w-3.5" />
+                    Add all to CSV queue
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Drop zone for more uploads */}
           <DropZone
             onDrop={onCsvDrop}
             onClick={() => csvInputRef.current?.click()}
             loading={loading}
-            hint="Drop images or ZIP archives of table images — or click to browse"
+            hint="Drop images or ZIP archives to add more — or click to browse"
           >
             <input ref={csvInputRef} type="file" multiple className="hidden"
               accept="image/*,.zip,application/zip,application/x-zip-compressed"
@@ -695,38 +854,71 @@ export function NewReceiptFlow() {
             <div className="space-y-4 px-4 pb-4 mt-4">
 
               {/* Batch controls */}
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm text-muted-foreground">
-                  {csvItems.length} image{csvItems.length !== 1 ? "s" : ""}
-                </span>
-
-                {/* Columns hint */}
-                <div className="flex-1 min-w-40">
+              <div className="flex flex-wrap items-start gap-2">
+                {/* Global columns hint */}
+                <div className="flex-1 min-w-52">
+                  <Label className="text-[11px] text-muted-foreground mb-0.5 block">
+                    Columns (global default for all extractions):
+                  </Label>
                   <Textarea
-                    placeholder="Columns hint (optional): e.g. Date, Item, Amount, VAT"
-                    value={columnsHint}
-                    onChange={(e) => setColumnsHint(e.target.value)}
+                    placeholder={DEFAULT_COLUMNS_HINT}
+                    value={csvColumnsHint}
+                    onChange={(e) => setCsvColumnsHint(e.target.value)}
                     className="h-8 resize-none text-xs"
                     rows={1}
                   />
                 </div>
 
-                <Button size="sm" variant="outline" onClick={runBatchExtract}>
-                  <TableProperties className="mr-1.5 h-3.5 w-3.5" />
-                  Extract all
-                </Button>
+                <div className="flex flex-wrap items-center gap-2 self-end">
+                  {/* Select all toggle */}
+                  <button
+                    onClick={toggleAllCsv}
+                    className={`flex items-center gap-1.5 rounded border px-2 py-1 text-xs transition ${
+                      allCsvSelected
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <span className={`flex h-3.5 w-3.5 items-center justify-center rounded-sm border ${
+                      allCsvSelected ? "border-primary bg-primary" : "border-muted-foreground"
+                    }`}>
+                      {allCsvSelected && <Check className="h-2.5 w-2.5 text-primary-foreground" />}
+                    </span>
+                    All
+                  </button>
 
-                <Button size="sm" variant="outline" onClick={exportAllCsvZip} disabled={csvExporting}>
-                  {csvExporting
-                    ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                    : <Download className="mr-1.5 h-3.5 w-3.5" />}
-                  Export all ZIP
-                </Button>
+                  <span className="text-sm text-muted-foreground">
+                    {csvItems.length} image{csvItems.length !== 1 ? "s" : ""}
+                    {selectedCsvIds.size > 0 && ` · ${selectedCsvIds.size} selected`}
+                  </span>
 
-                <Button size="sm" variant="ghost" className="text-destructive"
-                  onClick={() => setCsvItems([])}>
-                  <X className="mr-1 h-3.5 w-3.5" />Clear
-                </Button>
+                  {selectedCsvIds.size > 0 && (
+                    <Button size="sm" variant="outline" className="h-7 text-xs"
+                      onClick={() => runBatchExtract([...selectedCsvIds])}>
+                      <TableProperties className="mr-1.5 h-3.5 w-3.5" />
+                      Extract selected ({selectedCsvIds.size})
+                    </Button>
+                  )}
+
+                  <Button size="sm" variant="outline" className="h-7 text-xs"
+                    onClick={() => runBatchExtract()}>
+                    <TableProperties className="mr-1.5 h-3.5 w-3.5" />
+                    Extract all
+                  </Button>
+
+                  <Button size="sm" variant="outline" className="h-7 text-xs"
+                    onClick={exportAllCsvZip} disabled={csvExporting}>
+                    {csvExporting
+                      ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      : <Download className="mr-1.5 h-3.5 w-3.5" />}
+                    Export all ZIP
+                  </Button>
+
+                  <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive"
+                    onClick={() => { setCsvItems([]); setSelectedCsvIds(new Set()); }}>
+                    <X className="mr-1 h-3.5 w-3.5" />Clear
+                  </Button>
+                </div>
               </div>
 
               {/* Item list */}
@@ -734,14 +926,33 @@ export function NewReceiptFlow() {
                 {csvItems.map((item) => {
                   const displayRows = item.editedRows ?? item.extraction?.rows ?? [];
                   const columns     = item.extraction?.columns ?? [];
+                  const isSel       = selectedCsvIds.has(item.id);
                   return (
                     <div key={item.id}
-                      className="rounded-lg border border-border p-3 space-y-3">
+                      className={`rounded-lg border p-3 space-y-3 transition-colors ${
+                        isSel ? "border-primary bg-primary/5" : "border-border"
+                      }`}>
 
-                      {/* Top row: thumb + controls */}
+                      {/* Top row: checkbox + thumb + controls */}
                       <div className="flex gap-3">
-                        <img src={item.dataUrl} alt={item.name}
-                          className="h-24 w-20 flex-shrink-0 rounded object-cover" />
+                        {/* Checkbox */}
+                        <button
+                          onClick={() => toggleCsvSelect(item.id)}
+                          className={`mt-1 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border transition ${
+                            isSel ? "border-primary bg-primary" : "border-muted-foreground hover:border-primary"
+                          }`}
+                        >
+                          {isSel && <Check className="h-2.5 w-2.5 text-primary-foreground" />}
+                        </button>
+
+                        {/* Thumbnail — click to preview */}
+                        <img
+                          src={item.dataUrl}
+                          alt={item.name}
+                          className="h-24 w-20 flex-shrink-0 cursor-zoom-in rounded object-cover ring-1 ring-border hover:ring-primary"
+                          title="Click to preview"
+                          onClick={() => setCsvPreviewUrl(item.dataUrl)}
+                        />
 
                         <div className="flex flex-1 flex-col gap-2 min-w-0">
                           <p className="truncate text-xs font-medium" title={item.name}>
@@ -807,8 +1018,14 @@ export function NewReceiptFlow() {
                             )}
 
                             <Button size="icon" variant="ghost" className="ml-auto h-7 w-7 text-muted-foreground"
-                              onClick={() =>
-                                setCsvItems((p) => p.filter((it) => it.id !== item.id))}>
+                              onClick={() => {
+                                setCsvItems((p) => p.filter((it) => it.id !== item.id));
+                                setSelectedCsvIds((prev) => {
+                                  const next = new Set(prev);
+                                  next.delete(item.id);
+                                  return next;
+                                });
+                              }}>
                               <X className="h-3.5 w-3.5" />
                             </Button>
                           </div>
@@ -818,7 +1035,7 @@ export function NewReceiptFlow() {
                       {/* Editable CSV table */}
                       {columns.length > 0 && (
                         <CsvTable
-                          filename={`${item.year}-${item.month}.part${item.part}.${item.name}`}
+                          filename={csvExportName(item)}
                           columns={columns}
                           rows={displayRows}
                           onRowsChange={(rows) =>
@@ -842,6 +1059,7 @@ export function NewReceiptFlow() {
           imageName={cropCtx.imageName}
           defaultYear={cropCtx.defaultYear}
           defaultMonth={cropCtx.defaultMonth}
+          pageCount={cropCtx.pageCount}
           onExtract={handleCropExtract}
           onClose={() => setCropCtx(null)}
         />
@@ -860,6 +1078,25 @@ export function NewReceiptFlow() {
           <img
             src={pdfPreview}
             alt="PDF preview"
+            className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      )}
+
+      {/* ── CSV image preview overlay ── */}
+      {csvPreviewUrl && (
+        <div
+          className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/85"
+          onClick={() => setCsvPreviewUrl(null)}>
+          <button
+            className="absolute right-4 top-4 rounded-full bg-white/10 p-2 text-white hover:bg-white/20"
+            onClick={() => setCsvPreviewUrl(null)}>
+            <X className="h-5 w-5" />
+          </button>
+          <img
+            src={csvPreviewUrl}
+            alt="Image preview"
             className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           />

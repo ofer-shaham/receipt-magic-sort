@@ -9,6 +9,7 @@ import {
 } from "@tanstack/react-router";
 import { useEffect, type ReactNode } from "react";
 import { AppHeader } from "@/components/AppHeader";
+import { AppFooter } from "@/components/AppFooter";
 import { AppStoreProvider } from "@/contexts/AppStore";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
@@ -102,8 +103,11 @@ function RootComponent() {
       {/* AppStoreProvider survives /old ↔ /new switches — state is never lost */}
       <AppStoreProvider>
         <AppHeader />
-        {/* Child routes render here */}
-        <Outlet />
+        {/* Child routes render here; pb-10 clears the fixed footer */}
+        <div className="pb-10">
+          <Outlet />
+        </div>
+        <AppFooter />
       </AppStoreProvider>
     </QueryClientProvider>
   );

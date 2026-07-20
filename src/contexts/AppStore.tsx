@@ -49,6 +49,9 @@ export type StoreCsvItem = {
   extractError?: string;
 };
 
+// ── Default global columns hint ───────────────────────────────────────────────
+export const DEFAULT_COLUMNS_HINT = "יום,ערך,תיאור פעולה,אסמכתא,זכות,חובה,יתרה";
+
 // ── Context ───────────────────────────────────────────────────────────────────
 
 type AppStoreCtx = {
@@ -62,6 +65,9 @@ type AppStoreCtx = {
   // /new — image → csv
   csvItems:    StoreCsvItem[];
   setCsvItems: React.Dispatch<React.SetStateAction<StoreCsvItem[]>>;
+  // global CSV columns hint (shared across all extractions)
+  csvColumnsHint:    string;
+  setCsvColumnsHint: React.Dispatch<React.SetStateAction<string>>;
   // active internal tab in /new
   newTab:    "crop" | "csv";
   setNewTab: React.Dispatch<React.SetStateAction<"crop" | "csv">>;
@@ -70,11 +76,12 @@ type AppStoreCtx = {
 const AppStore = createContext<AppStoreCtx | null>(null);
 
 export function AppStoreProvider({ children }: { children: React.ReactNode }) {
-  const [pdfs,     setPdfs]     = useState<StorePdfItem[]>([]);
-  const [sources,  setSources]  = useState<StoreSourceItem[]>([]);
-  const [tagged,   setTagged]   = useState<StoreTaggedItem[]>([]);
-  const [csvItems, setCsvItems] = useState<StoreCsvItem[]>([]);
-  const [newTab,   setNewTab]   = useState<"crop" | "csv">("crop");
+  const [pdfs,           setPdfs]           = useState<StorePdfItem[]>([]);
+  const [sources,        setSources]        = useState<StoreSourceItem[]>([]);
+  const [tagged,         setTagged]         = useState<StoreTaggedItem[]>([]);
+  const [csvItems,       setCsvItems]       = useState<StoreCsvItem[]>([]);
+  const [csvColumnsHint, setCsvColumnsHint] = useState<string>(DEFAULT_COLUMNS_HINT);
+  const [newTab,         setNewTab]         = useState<"crop" | "csv">("crop");
 
   return (
     <AppStore.Provider value={{
@@ -82,6 +89,7 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       sources, setSources,
       tagged, setTagged,
       csvItems, setCsvItems,
+      csvColumnsHint, setCsvColumnsHint,
       newTab, setNewTab,
     }}>
       {children}

@@ -6,7 +6,8 @@
 export async function pdfToStitchedJpeg(
   file: File,
   dpi = 150,
-): Promise<File> {
+  onProgress?: (current: number, total: number) => void,
+): Promise<{ file: File; pageCount: number }> {
   const pdfjsLib = await import("pdfjs-dist");
 
   // Point the worker at the bundled copy so Vite can resolve it at build time.
@@ -24,6 +25,7 @@ export async function pdfToStitchedJpeg(
   let maxWidth = 0;
 
   for (let i = 1; i <= pdf.numPages; i++) {
+    onProgress?.(i, pdf.numPages);
     const page = await pdf.getPage(i);
     const vp = page.getViewport({ scale });
     const canvas = document.createElement("canvas");
@@ -54,5 +56,8 @@ export async function pdfToStitchedJpeg(
     stitched.toBlob((b) => res(b!), "image/jpeg", 0.85),
   );
   const base = file.name.replace(/\.pdf$/i, "");
-  return new File([blob], `${base}.jpg`, { type: "image/jpeg" });
+  return {
+    file: new File([blob], `${base}.jpg`, { type: "image/jpeg" }),
+    pageCount: pdf.numPages,
+  };
 }

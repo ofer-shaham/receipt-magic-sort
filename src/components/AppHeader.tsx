@@ -1,13 +1,12 @@
 /**
  * AppHeader — shared top navigation that appears on every route.
- * Contains: app title | theme selector | AI settings | logs | route tabs (Old / New)
+ * Contains: app title | theme selector | route tabs (Old / New)
+ * AI Settings and Logs have moved to AppFooter.
  */
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Sun, Moon, Droplet } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { AISettingsPanel } from "@/components/AISettingsPanel";
-import { LogsPanel } from "@/components/LogsPanel";
 
 type Theme = "light" | "dark" | "blue";
 const THEME_KEY = "receipt-theme";
@@ -34,7 +33,7 @@ export function AppHeader() {
 
   return (
     <header className="border-b border-border bg-background">
-      {/* ── Top bar: title | theme | AI | Logs ── */}
+      {/* ── Top bar: title | theme ── */}
       <div className="flex h-12 items-center gap-2 px-4">
         <span className="text-sm font-bold tracking-tight text-foreground select-none">
           ReceiptForge
@@ -54,9 +53,6 @@ export function AppHeader() {
             <Droplet className="h-3.5 w-3.5" />
           </ThemeBtn>
         </div>
-
-        <AISettingsPanel />
-        <LogsPanel />
       </div>
 
       {/* ── Route tabs: Old | New ── */}
