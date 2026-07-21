@@ -304,6 +304,9 @@ export function ReceiptApp() {
   const [multiQueueOpen, setMultiQueueOpen] = useState(false);
 
   const [customPrompt, setCustomPrompt] = useState<string>("");
+  const [newKeyInput, setNewKeyInput] = useState("");
+  const [showNewKey, setShowNewKey] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(false);
 
   const dateCache = useRef<Record<string, CachedDate>>(loadDateCache());
   const keyIndexRef = useRef(0);
@@ -317,6 +320,45 @@ export function ReceiptApp() {
     setLogs((prev) =>
       [{ ...entry, id: crypto.randomUUID(), ts: Date.now(), category }, ...prev].slice(0, 200),
     );
+  }, []);
+
+  const addKey = useCallback((k: string) => {
+    k = k.trim();
+    if (!k) return;
+    setApiKeys((prev) => {
+      if (prev.includes(k)) { toast.warning("Key already added"); return prev; }
+      const next = [...prev, k];
+      localStorage.setItem(API_KEYS_STORAGE_V2, JSON.stringify(next));
+      window.dispatchEvent(new Event("ai-settings-changed"));
+      return next;
+    });
+  }, []);
+
+  const removeKey = useCallback((k: string) => {
+    setApiKeys((prev) => {
+      const next = prev.filter((x) => x !== k);
+      localStorage.setItem(API_KEYS_STORAGE_V2, JSON.stringify(next));
+      window.dispatchEvent(new Event("ai-settings-changed"));
+      return next;
+    });
+  }, []);
+
+  const fetchModels = useCallback(async () => {
+    setModelsLoading(true);
+    try {
+      const list = await fetchFreeVisionModelsList();
+      if (list.length) {
+        setModels(list);
+        localStorage.setItem(MODELS_LIST_STORAGE, JSON.stringify(list));
+        toast.success(`Loaded ${list.length} free vision models`);
+      } else {
+        toast.warning("No models returned");
+      }
+    } catch (e: any) {
+      toast.error(`Failed to fetch models: ${e?.message ?? e}`);
+    } finally {
+      setModelsLoading(false);
+    }
   }, []);
 
   const pushUserAction = useCallback((action: string, imageId: string, imageName: string, details?: string) => {
@@ -857,14 +899,32 @@ export function ReceiptApp() {
 
 
   const runAI = async (trialMode = false) => {
-    const hasOR = apiKeys.length > 0;
-    const hasGemini = !!settings.geminiApiKey.trim();
-    const provider = settings.aiProvider;
+    // Defensively read fresh keys from localStorage (GlobalAISettingsDialog writes there;
+    // event-based sync may not have fired yet if the dialog was just closed).
+    let effectiveKeys = apiKeys;
+    if (effectiveKeys.length === 0) {
+      try {
+        const raw = localStorage.getItem(API_KEYS_STORAGE_V2);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            effectiveKeys = parsed;
+            setApiKeys(parsed);
+          }
+        }
+      } catch {}
+    }
+    // Also read fresh settings (e.g. Gemini key entered via footer dialog)
+    const effectiveSettings = effectiveKeys !== apiKeys ? loadSettings() : settings;
+
+    const hasOR = effectiveKeys.length > 0;
+    const hasGemini = !!effectiveSettings.geminiApiKey.trim();
+    const provider = effectiveSettings.aiProvider;
     const useGemini =
       provider === "gemini" || (provider === "auto" && !hasOR && hasGemini);
 
     if (!hasOR && !hasGemini) {
-      toast.error("Add at least one API key (OpenRouter or Gemini)");
+      toast.error("Add at least one API key via the AI Settings button (⚙ in the footer)");
       return;
     }
     localStorage.setItem(MODEL_STORAGE, model);
@@ -1516,7 +1576,7 @@ export function ReceiptApp() {
                 <SettingsIcon className="mr-1 h-3.5 w-3.5" /> Controls
               </Button>
             </div>
-            <Accordion type="multiple" defaultValue={["actions"]}>
+            <Accordion type="multiple" defaultValue={["actions", "keys", "models"]}>
               {settings.visibleSections.actions && (
               <AccordionItem value="actions">
                 <AccordionTrigger className="py-2">Actions</AccordionTrigger>
@@ -1715,6 +1775,155 @@ export function ReceiptApp() {
                 </AccordionContent>
               </AccordionItem>
               )}
+
+              <AccordionItem value="keys">
+                <AccordionTrigger className="py-2">API Keys</AccordionTrigger>
+                <AccordionContent className="space-y-3">
+                  {/* Provider */}
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">AI Provider</Label>
+                    <div className="flex gap-2">
+                      {(["auto", "openrouter", "gemini"] as const).map((p) => (
+                        <Button key={p} size="sm" variant={settings.aiProvider === p ? "default" : "outline"}
+                          onClick={() => setSettings((s) => ({ ...s, aiProvider: p }))} className="capitalize">
+                          {p}
+                        </Button>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">Auto uses OpenRouter first, falls back to Gemini on insufficient credits.</p>
+                  </div>
+
+                  {/* OpenRouter keys */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        OpenRouter Keys ({apiKeys.length})
+                      </Label>
+                      <div className="flex items-center gap-1.5 text-xs">
+                        {creditsLoading
+                          ? <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                          : credits
+                            ? <span><span className="font-semibold text-primary">${credits.remaining.toFixed(4)}</span><span className="text-muted-foreground"> / ${credits.totalCredits.toFixed(2)}</span></span>
+                            : apiKeys.length ? <span className="text-muted-foreground">—</span> : null
+                        }
+                        {apiKeys.length > 0 && (
+                          <button onClick={() => refreshCredits()} disabled={creditsLoading}
+                            className="text-muted-foreground hover:text-foreground disabled:opacity-40">
+                            <RefreshCw className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {apiKeys.length === 0 && <p className="text-xs text-muted-foreground">No keys added yet.</p>}
+                    {apiKeys.map((k, i) => (
+                      <div key={i} className="flex items-center gap-2 rounded border border-border bg-muted/30 px-2.5 py-1.5 text-xs">
+                        <span className="flex-1 truncate font-mono">#{i + 1} · {k.slice(0, 10)}…{k.slice(-4)}</span>
+                        <Button size="icon" variant="ghost" className="h-5 w-5 text-muted-foreground hover:text-destructive" onClick={() => removeKey(k)}>
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    ))}
+                    <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <Input type={showNewKey ? "text" : "password"} placeholder="sk-or-…"
+                          value={newKeyInput} onChange={(e) => setNewKeyInput(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") { addKey(newKeyInput); setNewKeyInput(""); } }}
+                          className="h-8 pr-8 font-mono text-xs" />
+                        <button type="button"
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                          onClick={() => setShowNewKey((v) => !v)}>
+                          {showNewKey ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                        </button>
+                      </div>
+                      <Button size="sm" className="h-8 px-3" onClick={() => { addKey(newKeyInput); setNewKeyInput(""); }}>
+                        <Plus className="mr-1 h-3.5 w-3.5" /> Add
+                      </Button>
+                    </div>
+                    <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-[11px] text-muted-foreground underline-offset-2 hover:underline">
+                      Get a free key at openrouter.ai <ExternalLink className="h-2.5 w-2.5" />
+                    </a>
+                    {/* Cooldown */}
+                    <div className="space-y-2 border-t pt-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <Label className="text-xs">Min delay between key uses</Label>
+                        <div className="flex items-center gap-1.5">
+                          <Input type="number" min={0} max={120} value={settings.minKeyIntervalSec}
+                            onChange={(e) => setSettings((s) => ({ ...s, minKeyIntervalSec: Math.max(0, Number(e.target.value) || 0) }))}
+                            className="h-7 w-20 text-xs" />
+                          <span className="text-xs text-muted-foreground">sec</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <Label className="text-xs">Cooldown after N failures</Label>
+                        <div className="flex items-center gap-1.5">
+                          <Input type="number" min={1} value={settings.cooldownAfterFailures}
+                            onChange={(e) => setSettings((s) => ({ ...s, cooldownAfterFailures: Math.max(1, Number(e.target.value) || 3) }))}
+                            className="h-7 w-16 text-xs" />
+                          <span className="text-xs text-muted-foreground">→</span>
+                          <Input type="number" min={5} value={settings.cooldownSec}
+                            onChange={(e) => setSettings((s) => ({ ...s, cooldownSec: Math.max(5, Number(e.target.value) || 65) }))}
+                            className="h-7 w-20 text-xs" />
+                          <span className="text-xs text-muted-foreground">sec</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Gemini */}
+                  <div className="space-y-1.5 border-t pt-2">
+                    <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Google Gemini (direct)</Label>
+                    <Input type="password" placeholder="AIza…" value={settings.geminiApiKey}
+                      onChange={(e) => setSettings((s) => ({ ...s, geminiApiKey: e.target.value }))}
+                      className="h-8 font-mono text-xs" />
+                    <Input placeholder="gemini-2.0-flash" value={settings.geminiModel}
+                      onChange={(e) => setSettings((s) => ({ ...s, geminiModel: e.target.value }))}
+                      className="h-8 font-mono text-xs" />
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+
+              <AccordionItem value="models">
+                <AccordionTrigger className="py-2">Model</AccordionTrigger>
+                <AccordionContent className="space-y-2">
+                  <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    OpenRouter Model ({models.length} free)
+                  </Label>
+                  <div className="flex gap-2">
+                    <select value={models.includes(model) ? model : "__custom__"}
+                      onChange={(e) => { if (e.target.value !== "__custom__") setModel(e.target.value); }}
+                      className="h-9 flex-1 rounded-md border bg-card px-2 text-xs">
+                      {models.map((m) => <option key={m} value={m}>{m}</option>)}
+                      {!models.includes(model) && <option value="__custom__">{model} (custom)</option>}
+                    </select>
+                    <Button size="sm" variant="outline" onClick={fetchModels} disabled={modelsLoading} className="h-9">
+                      {modelsLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                      <span className="ml-1">Fetch free</span>
+                    </Button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Label className="text-xs whitespace-nowrap">Custom slug</Label>
+                    <Input value={model} onChange={(e) => setModel(e.target.value)}
+                      placeholder="vendor/model[:free]" className="h-8 text-xs font-mono" />
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Pick from the list or type any OpenRouter model slug.
+                  </p>
+                  <label className="flex cursor-pointer items-start gap-2 rounded-md border bg-muted/40 p-2.5 text-xs">
+                    <input type="checkbox" className="mt-0.5" checked={queryAllModels}
+                      onChange={(e) => {
+                        setQueryAllModels(e.target.checked);
+                        localStorage.setItem("receipt-query-all-models", String(e.target.checked));
+                      }} />
+                    <span>
+                      <span className="font-medium">Query ALL {models.length} listed models in parallel</span>
+                      <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                        For each image, fire one request per listed model concurrently. Best ISO-dated response wins.
+                      </span>
+                    </span>
+                  </label>
+                </AccordionContent>
+              </AccordionItem>
 
               {settings.visibleSections.quality && (
               <AccordionItem value="quality">
