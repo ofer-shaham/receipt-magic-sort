@@ -23,10 +23,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import {
-  ImageIcon, FileArchive, FileText, Loader2, X, Scissors, Eye,
-  Download, Pencil, Check, Sparkles, TableProperties, Plus, ChevronDown, ChevronUp,
-} from "lucide-react";
+import { Image as ImageIcon, FileArchive, FileText, Loader as Loader2, X, Scissors, Eye, Download, Pencil, Check, Sparkles, TableProperties, Plus, ChevronDown, ChevronUp } from "lucide-react";
 import type { TaggedCrop } from "@/components/CropWizard";
 import { pdfToStitchedJpeg } from "@/lib/new-flow/pdf-to-image";
 import { extractTableFromImage, toCsv } from "@/lib/new-flow/csv-extract";
@@ -66,20 +63,6 @@ function loadTagCache(): Record<string, { year: string; month: string; part: str
 }
 function saveTagCache(c: Record<string, { year: string; month: string; part: string }>) {
   try { localStorage.setItem(TAG_CACHE_K, JSON.stringify(c)); } catch { /* ignore */ }
-}
-function readORModel() {
-  return localStorage.getItem("openrouter-model") || "google/gemini-2.0-flash-lite-001";
-}
-function readORKeys(): string[] {
-  try {
-    const v2 = localStorage.getItem("openrouter-api-keys-v2");
-    if (v2) { const p = JSON.parse(v2); if (Array.isArray(p)) return p.filter(Boolean); }
-    const v1 = localStorage.getItem("openrouter-api-keys");
-    if (v1) { const p = JSON.parse(v1); if (Array.isArray(p)) return p.filter(Boolean); }
-    const s  = localStorage.getItem("openrouter-api-key");
-    if (s) return [s];
-  } catch { /* ignore */ }
-  return [];
 }
 
 async function fileToDataUrl(file: File): Promise<string> {
@@ -416,24 +399,18 @@ export function NewReceiptFlow() {
   const runExtract = useCallback(async (id: string) => {
     const item = csvItems.find((it) => it.id === id);
     if (!item) return;
-    const keys = readORKeys();
-    if (!keys.length) {
-      toast.error("Add an OpenRouter API key in AI Settings (footer ⚙ button).");
-      return;
-    }
     setCsvItems((p) => p.map((it) => it.id === id ? { ...it, extractState: "loading" } : it));
     try {
-      const result = await extractTableFromImage(item.dataUrl, csvColumnsHint);
-      const model  = readORModel();
+      const outcome = await extractTableFromImage(item.dataUrl, csvColumnsHint);
       appendAILog({
         ts: Date.now(), filename: item.name,
-        model, provider: "openrouter",
+        model: outcome.meta.model, provider: outcome.meta.provider,
         byteSize: item.file.size, origin: "images-to-csv",
       });
       setCsvItems((p) =>
         p.map((it) =>
           it.id === id
-            ? { ...it, extraction: result, editedRows: result.rows.map((r) => [...r]), extractState: "done" }
+            ? { ...it, extraction: { columns: outcome.columns, rows: outcome.rows }, editedRows: outcome.rows.map((r) => [...r]), extractState: "done" }
             : it,
         ),
       );

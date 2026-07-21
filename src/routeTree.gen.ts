@@ -9,15 +9,15 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as OldRouteImport } from './routes/old'
-import { Route as NewRouteImport } from './routes/new'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as NewPdfToImagesRouteImport } from './routes/new.pdf-to-images'
+import { Route as NewRouteImport } from './routes/new'
+import { Route as OldRouteImport } from './routes/old'
 import { Route as NewImagesToCsvRouteImport } from './routes/new.images-to-csv'
+import { Route as NewPdfToImagesRouteImport } from './routes/new.pdf-to-images'
 
-const OldRoute = OldRouteImport.update({
-  id: '/old',
-  path: '/old',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const NewRoute = NewRouteImport.update({
@@ -25,19 +25,19 @@ const NewRoute = NewRouteImport.update({
   path: '/new',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const OldRoute = OldRouteImport.update({
+  id: '/old',
+  path: '/old',
   getParentRoute: () => rootRouteImport,
-} as any)
-const NewPdfToImagesRoute = NewPdfToImagesRouteImport.update({
-  id: '/pdf-to-images',
-  path: '/pdf-to-images',
-  getParentRoute: () => NewRoute,
 } as any)
 const NewImagesToCsvRoute = NewImagesToCsvRouteImport.update({
   id: '/images-to-csv',
   path: '/images-to-csv',
+  getParentRoute: () => NewRoute,
+} as any)
+const NewPdfToImagesRoute = NewPdfToImagesRouteImport.update({
+  id: '/pdf-to-images',
+  path: '/pdf-to-images',
   getParentRoute: () => NewRoute,
 } as any)
 
@@ -85,11 +85,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/old': {
-      id: '/old'
-      path: '/old'
-      fullPath: '/old'
-      preLoaderRoute: typeof OldRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/new': {
@@ -99,25 +99,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof NewRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/old': {
+      id: '/old'
+      path: '/old'
+      fullPath: '/old'
+      preLoaderRoute: typeof OldRouteImport
       parentRoute: typeof rootRouteImport
-    }
-    '/new/pdf-to-images': {
-      id: '/new/pdf-to-images'
-      path: '/pdf-to-images'
-      fullPath: '/new/pdf-to-images'
-      preLoaderRoute: typeof NewPdfToImagesRouteImport
-      parentRoute: typeof NewRoute
     }
     '/new/images-to-csv': {
       id: '/new/images-to-csv'
       path: '/images-to-csv'
       fullPath: '/new/images-to-csv'
       preLoaderRoute: typeof NewImagesToCsvRouteImport
+      parentRoute: typeof NewRoute
+    }
+    '/new/pdf-to-images': {
+      id: '/new/pdf-to-images'
+      path: '/pdf-to-images'
+      fullPath: '/new/pdf-to-images'
+      preLoaderRoute: typeof NewPdfToImagesRouteImport
       parentRoute: typeof NewRoute
     }
   }

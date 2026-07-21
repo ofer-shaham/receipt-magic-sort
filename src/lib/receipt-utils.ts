@@ -689,6 +689,45 @@ export async function fetchOpenRouterCredits(
   };
 }
 
+// Built-in fallback list of Gemini vision-capable models (direct API).
+export const FREE_GEMINI_MODELS = [
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-1.5-flash",
+  "gemini-1.5-flash-8b",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-pro",
+] as const;
+
+// Fetch the list of Gemini models that support image input, direct from the
+// Generative Language API. Returns model ids (e.g. "gemini-2.0-flash").
+export async function fetchGeminiVisionModels(apiKey: string): Promise<string[]> {
+  if (!apiKey) throw new Error("Gemini API key required");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(url);
+  const json: any = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = json?.error?.message || `HTTP ${res.status}`;
+    throw new Error(`Gemini models: ${msg}`);
+  }
+  const models: any[] = json?.models ?? [];
+  const out: string[] = [];
+  for (const m of models) {
+    const name: string = m?.name ?? "";
+    const id = name.replace(/^models\//, "");
+    const methods: string[] = m?.supportedGenerationMethods ?? [];
+    if (methods.includes("generateContent")) {
+      const desc = `${m?.description ?? ""} ${id}`;
+      if (/vision|image|multimodal|flash|pro/i.test(desc) && !/embed|text-only|tts|speech|audio/i.test(desc)) {
+        out.push(id);
+      }
+    }
+  }
+  if (!out.length) return [...FREE_GEMINI_MODELS];
+  return Array.from(new Set(out));
+}
+
 // Filename-safe slug
 export function safeSlug(s: string): string {
   return s.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 80);

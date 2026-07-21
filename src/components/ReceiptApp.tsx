@@ -49,7 +49,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { Upload, Download, Sparkles, ArrowUpDown, X, Loader as Loader2, FileText, TriangleAlert as AlertTriangle, ExternalLink, Trash2, RefreshCw, Tag, Archive, Wand as Wand2, ChevronLeft, ChevronRight, Plus, Sun, Moon, Droplet, FileDown, Upload as UploadIcon, Table as TableIcon, Maximize2, Check, Settings as SettingsIcon, EyeOff, Copy, Clock, Lightbulb, ClipboardList, RotateCw, Scissors, Eye } from "lucide-react";
+import { Upload, Download, Sparkles, ArrowUpDown, X, Loader as Loader2, FileText, TriangleAlert as AlertTriangle, ExternalLink, Trash2, RefreshCw, Tag, Archive, Wand as Wand2, ChevronLeft, ChevronRight, Plus, Sun, Moon, Droplet, FileDown, Upload as UploadIcon, Table as TableIcon, Maximize2, Check, Settings as SettingsIcon, EyeOff, Copy, Clock, ClipboardList, RotateCw, Scissors, Eye } from "lucide-react";
 
 
 type DateSource = "ai" | "manual";
@@ -169,8 +169,6 @@ function saveDateCache(c: Record<string, CachedDate>) {
 type SectionKey =
   | "actions"
   | "quality"
-  | "keys"
-  | "models"
   | "years"
   | "report-opts";
 
@@ -213,8 +211,6 @@ const DEFAULT_SETTINGS: Settings = {
   visibleSections: {
     actions: true,
     quality: true,
-    keys: true,
-    models: true,
     years: true,
     "report-opts": true,
   },
@@ -290,15 +286,6 @@ export function ReceiptApp() {
   // Session-only analysis report (never persisted).
   const [analysisEntries, setAnalysisEntries] = useState<AnalysisEntry[]>([]);
   const [analysisOpen, setAnalysisOpen] = useState(false);
-
-  // Recommendation dialog state
-  const [recommendOpen, setRecommendOpen] = useState(false);
-  const [recommendation, setRecommendation] = useState<null | {
-    openrouter: { model: string; note: string } | null;
-    gemini: { model: string; note: string };
-    compare: string;
-    loading: boolean;
-  }>(null);
 
   // Multi-receipt handling queue (images whose AI returned 2+ dates).
   const [multiQueueOpen, setMultiQueueOpen] = useState(false);
@@ -1245,68 +1232,6 @@ export function ReceiptApp() {
     setCropWizardOpen(true);
   };
 
-  const buildRecommendation = async () => {
-    setRecommendOpen(true);
-    setRecommendation({
-      openrouter: null,
-      gemini: { model: "gemini-2.5-flash-lite", note: "" },
-      compare: "",
-      loading: true,
-    });
-    try {
-      const [freeList, cr] = await Promise.all([
-        fetchFreeVisionModelsList().catch(() => [] as string[]),
-        apiKeys[0]
-          ? fetchOpenRouterCredits(apiKeys[0]).catch(() => null)
-          : Promise.resolve(null),
-      ]);
-      // Prefer Gemini vision on free tier when available.
-      const preferOrder = [
-        "google/gemini-2.0-flash-exp:free",
-        "google/gemini-2.5-flash-image:free",
-        "qwen/qwen2.5-vl-72b-instruct:free",
-        "meta-llama/llama-3.2-11b-vision-instruct:free",
-      ];
-      const orModel =
-        preferOrder.find((m) => freeList.includes(m)) ??
-        freeList[0] ??
-        FREE_VISION_MODELS[0];
-      const orNote = freeList.length
-        ? `Picked from ${freeList.length} vision-capable free models. Rate-limited by OpenRouter (~10/min per key, ~200/day).`
-        : "Free model list unavailable — using built-in fallback.";
-      const remaining = cr?.remaining ?? 0;
-      // Direct Gemini choice.
-      const geminiModel =
-        remaining < 0.01 && !settings.geminiApiKey.trim()
-          ? "gemini-2.5-flash-lite"
-          : "gemini-2.5-flash-lite";
-      const geminiNote =
-        "Cheapest Gemini vision model (~$0.10/1M in, $0.40/1M out). ~1.4K in + 80 out per receipt = ~$0.00018/req → ~5,500 req/$1. Bypasses OpenRouter rate limits.";
-      let compare = "";
-      if (
-        orModel.startsWith("google/gemini") &&
-        geminiModel.startsWith("gemini")
-      ) {
-        compare =
-          "Same underlying family (Google Gemini vision). The free OpenRouter route is $0 but rate-limited; the direct Gemini API costs ~$0.0002/receipt with no free-tier daily cap and higher throughput.";
-      } else {
-        compare =
-          "Different providers. OpenRouter free route saves money but rate-limits daily; Gemini direct is paid but faster and unlimited.";
-      }
-      setRecommendation({
-        openrouter: { model: orModel, note: orNote },
-        gemini: { model: geminiModel, note: geminiNote },
-        compare,
-        loading: false,
-      });
-    } catch (e) {
-      toast.error(`Recommendation failed: ${(e as Error).message}`);
-      setRecommendation((r) => (r ? { ...r, loading: false } : r));
-    }
-  };
-
-
-
   const buildWizardQueue = () => {
     // Priority: untagged → AI-tagged-but-unapproved → approved/manual
     const untagged = receipts.filter((r) => !r.date).map((r) => r.id);
@@ -1576,7 +1501,7 @@ export function ReceiptApp() {
                 <SettingsIcon className="mr-1 h-3.5 w-3.5" /> Controls
               </Button>
             </div>
-            <Accordion type="multiple" defaultValue={["actions", "keys", "models"]}>
+            <Accordion type="multiple" defaultValue={["actions", "ai-status"]}>
               {settings.visibleSections.actions && (
               <AccordionItem value="actions">
                 <AccordionTrigger className="py-2">Actions</AccordionTrigger>
@@ -1625,14 +1550,6 @@ export function ReceiptApp() {
                     </div>
                     <Button onClick={() => startWizard()} variant="secondary" size="sm" disabled={!receipts.length}>
                       <Wand2 className="mr-1.5 h-4 w-4" /> Review wizard
-                    </Button>
-                    <Button
-                      onClick={buildRecommendation}
-                      variant="outline"
-                      size="sm"
-                      title="Recommend best OpenRouter-free & Gemini vision models"
-                    >
-                      <Lightbulb className="mr-1.5 h-4 w-4" /> Recommend model
                     </Button>
                     <Button
                       onClick={() => setAnalysisOpen(true)}
@@ -1776,152 +1693,53 @@ export function ReceiptApp() {
               </AccordionItem>
               )}
 
-              <AccordionItem value="keys">
-                <AccordionTrigger className="py-2">API Keys</AccordionTrigger>
+              <AccordionItem value="ai-status">
+                <AccordionTrigger className="py-2">AI Status</AccordionTrigger>
                 <AccordionContent className="space-y-3">
-                  {/* Provider */}
-                  <div className="space-y-1.5">
-                    <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">AI Provider</Label>
-                    <div className="flex gap-2">
-                      {(["auto", "openrouter", "gemini"] as const).map((p) => (
-                        <Button key={p} size="sm" variant={settings.aiProvider === p ? "default" : "outline"}
-                          onClick={() => setSettings((s) => ({ ...s, aiProvider: p }))} className="capitalize">
-                          {p}
-                        </Button>
-                      ))}
-                    </div>
-                    <p className="text-[11px] text-muted-foreground">Auto uses OpenRouter first, falls back to Gemini on insufficient credits.</p>
-                  </div>
-
-                  {/* OpenRouter keys */}
+                  <p className="text-xs text-muted-foreground">
+                    Provider and keys are configured via the <span className="font-medium text-foreground">AI Settings</span> button (⚙ in the footer).
+                  </p>
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between">
                       <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                        OpenRouter Keys ({apiKeys.length})
+                        Provider
                       </Label>
-                      <div className="flex items-center gap-1.5 text-xs">
-                        {creditsLoading
-                          ? <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
-                          : credits
-                            ? <span><span className="font-semibold text-primary">${credits.remaining.toFixed(4)}</span><span className="text-muted-foreground"> / ${credits.totalCredits.toFixed(2)}</span></span>
-                            : apiKeys.length ? <span className="text-muted-foreground">—</span> : null
-                        }
-                        {apiKeys.length > 0 && (
-                          <button onClick={() => refreshCredits()} disabled={creditsLoading}
-                            className="text-muted-foreground hover:text-foreground disabled:opacity-40">
-                            <RefreshCw className="h-3 w-3" />
-                          </button>
-                        )}
-                      </div>
+                      <span className="text-xs font-medium capitalize text-foreground">{settings.aiProvider}</span>
                     </div>
-                    {apiKeys.length === 0 && <p className="text-xs text-muted-foreground">No keys added yet.</p>}
-                    {apiKeys.map((k, i) => (
-                      <div key={i} className="flex items-center gap-2 rounded border border-border bg-muted/30 px-2.5 py-1.5 text-xs">
-                        <span className="flex-1 truncate font-mono">#{i + 1} · {k.slice(0, 10)}…{k.slice(-4)}</span>
-                        <Button size="icon" variant="ghost" className="h-5 w-5 text-muted-foreground hover:text-destructive" onClick={() => removeKey(k)}>
-                          <X className="h-3 w-3" />
-                        </Button>
-                      </div>
-                    ))}
-                    <div className="flex gap-2">
-                      <div className="relative flex-1">
-                        <Input type={showNewKey ? "text" : "password"} placeholder="sk-or-…"
-                          value={newKeyInput} onChange={(e) => setNewKeyInput(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") { addKey(newKeyInput); setNewKeyInput(""); } }}
-                          className="h-8 pr-8 font-mono text-xs" />
-                        <button type="button"
-                          className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                          onClick={() => setShowNewKey((v) => !v)}>
-                          {showNewKey ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-                        </button>
-                      </div>
-                      <Button size="sm" className="h-8 px-3" onClick={() => { addKey(newKeyInput); setNewKeyInput(""); }}>
-                        <Plus className="mr-1 h-3.5 w-3.5" /> Add
-                      </Button>
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        OpenRouter Keys
+                      </Label>
+                      <span className="text-xs text-foreground">{apiKeys.length}</span>
                     </div>
-                    <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-[11px] text-muted-foreground underline-offset-2 hover:underline">
-                      Get a free key at openrouter.ai <ExternalLink className="h-2.5 w-2.5" />
-                    </a>
-                    {/* Cooldown */}
-                    <div className="space-y-2 border-t pt-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <Label className="text-xs">Min delay between key uses</Label>
-                        <div className="flex items-center gap-1.5">
-                          <Input type="number" min={0} max={120} value={settings.minKeyIntervalSec}
-                            onChange={(e) => setSettings((s) => ({ ...s, minKeyIntervalSec: Math.max(0, Number(e.target.value) || 0) }))}
-                            className="h-7 w-20 text-xs" />
-                          <span className="text-xs text-muted-foreground">sec</span>
-                        </div>
-                      </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <Label className="text-xs">Cooldown after N failures</Label>
-                        <div className="flex items-center gap-1.5">
-                          <Input type="number" min={1} value={settings.cooldownAfterFailures}
-                            onChange={(e) => setSettings((s) => ({ ...s, cooldownAfterFailures: Math.max(1, Number(e.target.value) || 3) }))}
-                            className="h-7 w-16 text-xs" />
-                          <span className="text-xs text-muted-foreground">→</span>
-                          <Input type="number" min={5} value={settings.cooldownSec}
-                            onChange={(e) => setSettings((s) => ({ ...s, cooldownSec: Math.max(5, Number(e.target.value) || 65) }))}
-                            className="h-7 w-20 text-xs" />
-                          <span className="text-xs text-muted-foreground">sec</span>
-                        </div>
-                      </div>
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        OpenRouter Model
+                      </Label>
+                      <span className="truncate text-xs font-mono text-foreground" title={model}>{model}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        Gemini Model
+                      </Label>
+                      <span className="truncate text-xs font-mono text-foreground" title={settings.geminiModel}>{settings.geminiModel || "—"}</span>
                     </div>
                   </div>
-
-                  {/* Gemini */}
-                  <div className="space-y-1.5 border-t pt-2">
-                    <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Google Gemini (direct)</Label>
-                    <Input type="password" placeholder="AIza…" value={settings.geminiApiKey}
-                      onChange={(e) => setSettings((s) => ({ ...s, geminiApiKey: e.target.value }))}
-                      className="h-8 font-mono text-xs" />
-                    <Input placeholder="gemini-2.0-flash" value={settings.geminiModel}
-                      onChange={(e) => setSettings((s) => ({ ...s, geminiModel: e.target.value }))}
-                      className="h-8 font-mono text-xs" />
-                  </div>
-                </AccordionContent>
-              </AccordionItem>
-
-              <AccordionItem value="models">
-                <AccordionTrigger className="py-2">Model</AccordionTrigger>
-                <AccordionContent className="space-y-2">
-                  <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    OpenRouter Model ({models.length} free)
-                  </Label>
-                  <div className="flex gap-2">
-                    <select value={models.includes(model) ? model : "__custom__"}
-                      onChange={(e) => { if (e.target.value !== "__custom__") setModel(e.target.value); }}
-                      className="h-9 flex-1 rounded-md border bg-card px-2 text-xs">
-                      {models.map((m) => <option key={m} value={m}>{m}</option>)}
-                      {!models.includes(model) && <option value="__custom__">{model} (custom)</option>}
-                    </select>
-                    <Button size="sm" variant="outline" onClick={fetchModels} disabled={modelsLoading} className="h-9">
-                      {modelsLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-                      <span className="ml-1">Fetch free</span>
-                    </Button>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Label className="text-xs whitespace-nowrap">Custom slug</Label>
-                    <Input value={model} onChange={(e) => setModel(e.target.value)}
-                      placeholder="vendor/model[:free]" className="h-8 text-xs font-mono" />
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    Pick from the list or type any OpenRouter model slug.
-                  </p>
-                  <label className="flex cursor-pointer items-start gap-2 rounded-md border bg-muted/40 p-2.5 text-xs">
-                    <input type="checkbox" className="mt-0.5" checked={queryAllModels}
-                      onChange={(e) => {
-                        setQueryAllModels(e.target.checked);
-                        localStorage.setItem("receipt-query-all-models", String(e.target.checked));
-                      }} />
-                    <span>
-                      <span className="font-medium">Query ALL {models.length} listed models in parallel</span>
-                      <span className="mt-0.5 block text-[10px] text-muted-foreground">
-                        For each image, fire one request per listed model concurrently. Best ISO-dated response wins.
+                  <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2 text-xs shadow-sm">
+                    <span className="text-muted-foreground">Credits:</span>
+                    {credits ? (
+                      <span className="font-mono">
+                        <span className="font-semibold text-primary">${credits.remaining.toFixed(4)}</span>
+                        <span className="text-muted-foreground"> / ${credits.totalCredits.toFixed(2)}</span>
                       </span>
-                    </span>
-                  </label>
+                    ) : (
+                      <span className="text-muted-foreground">{apiKeys.length ? "—" : "add key"}</span>
+                    )}
+                    <button onClick={() => refreshCredits()} disabled={!apiKeys.length || creditsLoading}
+                      className="text-muted-foreground hover:text-foreground disabled:opacity-50" title="Refresh">
+                      <RefreshCw className={`h-3 w-3 ${creditsLoading ? "animate-spin" : ""}`} />
+                    </button>
+                  </div>
                 </AccordionContent>
               </AccordionItem>
 
@@ -2802,83 +2620,6 @@ export function ReceiptApp() {
               </tbody>
             </table>
           </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* Recommendation dialog */}
-      <Dialog open={recommendOpen} onOpenChange={setRecommendOpen}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Lightbulb className="h-4 w-4 text-primary" /> Model recommendation
-            </DialogTitle>
-          </DialogHeader>
-          {!recommendation || recommendation.loading ? (
-            <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" /> Querying OpenRouter…
-            </div>
-          ) : (
-            <div className="space-y-3 text-sm">
-              <div className="rounded-md border p-3">
-                <div className="mb-1 flex items-center justify-between">
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                    Best OpenRouter free model
-                  </span>
-                  {recommendation.openrouter && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        setModel(recommendation.openrouter!.model);
-                        localStorage.setItem(MODEL_STORAGE, recommendation.openrouter!.model);
-                        setSettings((s) => ({ ...s, aiProvider: "openrouter" }));
-                        toast.success("Applied OpenRouter model");
-                      }}
-                    >
-                      Apply
-                    </Button>
-                  )}
-                </div>
-                <p className="font-mono text-xs">
-                  {recommendation.openrouter?.model ?? "—"}
-                </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {recommendation.openrouter?.note ?? "No free models available."}
-                </p>
-              </div>
-
-              <div className="rounded-md border p-3">
-                <div className="mb-1 flex items-center justify-between">
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                    Best Gemini direct model
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      setSettings((s) => ({
-                        ...s,
-                        aiProvider: "gemini",
-                        geminiModel: recommendation.gemini.model,
-                      }));
-                      toast.success("Applied Gemini model");
-                    }}
-                  >
-                    Apply
-                  </Button>
-                </div>
-                <p className="font-mono text-xs">{recommendation.gemini.model}</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {recommendation.gemini.note}
-                </p>
-              </div>
-
-              <div className="rounded-md bg-muted/40 p-3 text-xs">
-                <p className="font-semibold">Comparison</p>
-                <p className="mt-1 text-muted-foreground">{recommendation.compare}</p>
-              </div>
-            </div>
-          )}
         </DialogContent>
       </Dialog>
 
