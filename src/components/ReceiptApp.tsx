@@ -49,7 +49,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { Upload, Download, Sparkles, ArrowUpDown, X, Loader as Loader2, FileText, KeyRound, TriangleAlert as AlertTriangle, ExternalLink, Trash2, RefreshCw, Tag, Archive, Wand as Wand2, ChevronLeft, ChevronRight, Plus, Sun, Moon, Droplet, FileDown, Upload as UploadIcon, Table as TableIcon, Maximize2, Check, Settings as SettingsIcon, EyeOff, Copy, Clock, Lightbulb, ClipboardList, RotateCw, Scissors, Eye } from "lucide-react";
+import { Upload, Download, Sparkles, ArrowUpDown, X, Loader as Loader2, FileText, TriangleAlert as AlertTriangle, ExternalLink, Trash2, RefreshCw, Tag, Archive, Wand as Wand2, ChevronLeft, ChevronRight, Plus, Sun, Moon, Droplet, FileDown, Upload as UploadIcon, Table as TableIcon, Maximize2, Check, Settings as SettingsIcon, EyeOff, Copy, Clock, Lightbulb, ClipboardList, RotateCw, Scissors, Eye } from "lucide-react";
 
 
 type DateSource = "ai" | "manual";
@@ -253,9 +253,7 @@ export function ReceiptApp() {
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [globalQuality, setGlobalQuality] = useState(70);
   const [apiKeys, setApiKeys] = useState<string[]>([]);
-  const [newKey, setNewKey] = useState("");
   const [models, setModels] = useState<string[]>([...FREE_VISION_MODELS]);
-  const [modelsLoading, setModelsLoading] = useState(false);
   const [model, setModel] = useState<string>(FREE_VISION_MODELS[0]);
   const [queryAllModels, setQueryAllModels] = useState<boolean>(false);
   const [pdfs, setPdfs] = useState<
@@ -305,9 +303,7 @@ export function ReceiptApp() {
   // Multi-receipt handling queue (images whose AI returned 2+ dates).
   const [multiQueueOpen, setMultiQueueOpen] = useState(false);
 
-  const [customPrompt, setCustomPrompt] = useState<string>(
-    () => localStorage.getItem(PROMPT_STORAGE) ?? "",
-  );
+  const [customPrompt, setCustomPrompt] = useState<string>("");
 
   const dateCache = useRef<Record<string, CachedDate>>(loadDateCache());
   const keyIndexRef = useRef(0);
@@ -426,6 +422,8 @@ export function ReceiptApp() {
     const ye = Number(localStorage.getItem(YEAR_END_STORAGE));
     if (ys) setYearStart(ys);
     if (ye) setYearEnd(ye);
+    setQueryAllModels(localStorage.getItem("receipt-query-all-models") === "true");
+    setCustomPrompt(localStorage.getItem(PROMPT_STORAGE) ?? "");
   }, []);
 
   const hydratedRef = useRef(false);
@@ -446,6 +444,27 @@ export function ReceiptApp() {
     localStorage.setItem(YEAR_START_STORAGE, String(yearStart));
     localStorage.setItem(YEAR_END_STORAGE, String(yearEnd));
   }, [yearStart, yearEnd]);
+
+  // Sync AI settings when GlobalAISettingsDialog writes them
+  useEffect(() => {
+    const sync = () => {
+      try {
+        const raw = localStorage.getItem(API_KEYS_STORAGE_V2);
+        if (raw) setApiKeys(JSON.parse(raw));
+      } catch { /* ignore */ }
+      const m = localStorage.getItem(MODEL_STORAGE);
+      if (m) setModel(m);
+      try {
+        const list = JSON.parse(localStorage.getItem(MODELS_LIST_STORAGE) || "null");
+        if (Array.isArray(list) && list.length) setModels(list);
+      } catch { /* ignore */ }
+      setSettings(loadSettings());
+      setCustomPrompt(localStorage.getItem(PROMPT_STORAGE) ?? "");
+      setQueryAllModels(localStorage.getItem("receipt-query-all-models") === "true");
+    };
+    window.addEventListener("ai-settings-changed", sync);
+    return () => window.removeEventListener("ai-settings-changed", sync);
+  }, []);
 
   // Theme application
   useEffect(() => {
@@ -836,22 +855,6 @@ export function ReceiptApp() {
     if (apiKeys.length) refreshCredits(true);
   }, [apiKeys, refreshCredits]);
 
-  const refreshModels = useCallback(async () => {
-    setModelsLoading(true);
-    try {
-      const list = await fetchFreeVisionModelsList();
-      if (list.length) {
-        setModels(list);
-        localStorage.setItem(MODELS_LIST_STORAGE, JSON.stringify(list));
-        toast.success(`Loaded ${list.length} free vision models`);
-      } else toast.warning("No models returned");
-    } catch (e) {
-      toast.error((e as Error).message);
-      pushLog({ level: "error", source: "openrouter/models", message: (e as Error).message });
-    } finally {
-      setModelsLoading(false);
-    }
-  }, [pushLog]);
 
   const runAI = async (trialMode = false) => {
     const hasOR = apiKeys.length > 0;
@@ -1319,19 +1322,6 @@ export function ReceiptApp() {
   };
   const cropTarget = receipts.find((r) => r.id === cropWizardId);
 
-  // Key management
-  const addKey = () => {
-    const k = newKey.trim();
-    if (!k) return;
-    if (apiKeys.includes(k)) {
-      toast.warning("Key already added");
-      return;
-    }
-    setApiKeys((p) => [...p, k]);
-    setNewKey("");
-  };
-  const removeKey = (i: number) =>
-    setApiKeys((p) => p.filter((_, idx) => idx !== i));
 
   // Export / import localStorage
   const exportStorage = () => {
@@ -1823,246 +1813,6 @@ export function ReceiptApp() {
               </AccordionItem>
               )}
 
-              {settings.visibleSections.keys && (
-              <AccordionItem value="keys">
-                <AccordionTrigger className="py-2">
-                  <span className="flex items-center gap-2">
-                    <KeyRound className="h-4 w-4" /> OpenRouter API keys ({apiKeys.length})
-                  </span>
-                </AccordionTrigger>
-                <AccordionContent className="space-y-3">
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">AI provider</Label>
-                    <div className="flex gap-2">
-                      {(["auto", "openrouter", "gemini"] as AIProvider[]).map((p) => (
-                        <Button
-                          key={p}
-                          size="sm"
-                          variant={settings.aiProvider === p ? "default" : "outline"}
-                          onClick={() => setSettings((s) => ({ ...s, aiProvider: p }))}
-                          className="text-xs capitalize"
-                        >
-                          {p}
-                        </Button>
-                      ))}
-                    </div>
-                    <p className="text-[10px] text-muted-foreground">
-                      Auto uses OpenRouter first and falls back to Gemini on insufficient credits.
-                    </p>
-                  </div>
-                  <div className="space-y-1.5 border-t pt-2">
-                    <Label className="text-xs">Google Gemini API key (direct)</Label>
-                    <Input
-                      type="password"
-                      placeholder="AIza…"
-                      value={settings.geminiApiKey}
-                      onChange={(e) =>
-                        setSettings((s) => ({ ...s, geminiApiKey: e.target.value }))
-                      }
-                      className="text-xs font-mono"
-                    />
-                    <Input
-                      placeholder="gemini-2.0-flash"
-                      value={settings.geminiModel}
-                      onChange={(e) =>
-                        setSettings((s) => ({ ...s, geminiModel: e.target.value }))
-                      }
-                      className="text-xs font-mono"
-                    />
-                  </div>
-                  <div className="border-t pt-2 space-y-2">
-                    <Label className="text-xs">OpenRouter keys</Label>
-                  <div className="flex gap-2">
-                    <Input
-                      type="password"
-                      placeholder="sk-or-…"
-                      value={newKey}
-                      onChange={(e) => setNewKey(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && addKey()}
-                      className="text-xs font-mono"
-                    />
-                    <Button size="sm" onClick={addKey}>
-                      <Plus className="mr-1 h-3 w-3" /> Add
-                    </Button>
-                  </div>
-                  {apiKeys.length > 0 && (
-                    <ul className="space-y-1">
-                      {apiKeys.map((k, i) => {
-                        const st = keyStateRef.current[k];
-                        const cooling =
-                          st && st.cooldownUntil > Date.now()
-                            ? Math.ceil((st.cooldownUntil - Date.now()) / 1000)
-                            : 0;
-                        return (
-                          <li
-                            key={i}
-                            className="flex items-center justify-between gap-2 rounded border bg-muted/30 px-2 py-1"
-                          >
-                            <span className="truncate font-mono text-[11px]">
-                              #{i + 1} · {k.slice(0, 10)}…{k.slice(-4)}
-                            </span>
-                            {cooling > 0 && (
-                              <span className="rounded bg-destructive/15 px-1.5 py-0.5 font-mono text-[10px] text-destructive">
-                                cooldown {cooling}s
-                              </span>
-                            )}
-                            <Button size="icon" variant="ghost" onClick={() => removeKey(i)}>
-                              <X className="h-3 w-3" />
-                            </Button>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                  <div className="flex items-center justify-between gap-2 pt-2">
-                    <Label className="text-xs">Min delay between key uses</Label>
-                    <div className="flex items-center gap-2">
-                      <Input
-                        type="number"
-                        min={0}
-                        max={120}
-                        value={settings.minKeyIntervalSec}
-                        onChange={(e) =>
-                          setSettings((s) => ({
-                            ...s,
-                            minKeyIntervalSec: Math.max(0, Number(e.target.value) || 0),
-                          }))
-                        }
-                        className="h-7 w-20 text-xs"
-                      />
-                      <span className="text-xs text-muted-foreground">sec</span>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <Label className="text-xs">Cooldown after N failures</Label>
-                    <div className="flex items-center gap-2">
-                      <Input
-                        type="number"
-                        min={1}
-                        value={settings.cooldownAfterFailures}
-                        onChange={(e) =>
-                          setSettings((s) => ({
-                            ...s,
-                            cooldownAfterFailures: Math.max(1, Number(e.target.value) || 3),
-                          }))
-                        }
-                        className="h-7 w-16 text-xs"
-                      />
-                      <span className="text-xs text-muted-foreground">→</span>
-                      <Input
-                        type="number"
-                        min={5}
-                        value={settings.cooldownSec}
-                        onChange={(e) =>
-                          setSettings((s) => ({
-                            ...s,
-                            cooldownSec: Math.max(5, Number(e.target.value) || 65),
-                          }))
-                        }
-                        className="h-7 w-20 text-xs"
-                      />
-                      <span className="text-xs text-muted-foreground">sec</span>
-                    </div>
-                  </div>
-                  </div>
-                </AccordionContent>
-              </AccordionItem>
-              )}
-
-              {settings.visibleSections.models && (
-              <AccordionItem value="models">
-                <AccordionTrigger className="py-2">
-                  Model ({models.length} free)
-                </AccordionTrigger>
-                <AccordionContent className="space-y-2">
-                  <div className="flex gap-2">
-                    <select
-                      value={models.includes(model) ? model : "__custom__"}
-                      onChange={(e) => {
-                        if (e.target.value === "__custom__") return;
-                        setModel(e.target.value);
-                        localStorage.setItem(MODEL_STORAGE, e.target.value);
-                      }}
-                      className="h-9 flex-1 rounded-md border bg-card px-2 text-xs"
-                    >
-                      {models.map((m) => (
-                        <option key={m} value={m}>
-                          {m}
-                        </option>
-                      ))}
-                      {!models.includes(model) && (
-                        <option value="__custom__">{model} (custom)</option>
-                      )}
-                    </select>
-                    <Button size="sm" variant="outline" onClick={refreshModels} disabled={modelsLoading}>
-                      {modelsLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-                      <span className="ml-1">Fetch free</span>
-                    </Button>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Label className="text-xs whitespace-nowrap">Model slug</Label>
-                    <Input
-                      value={model}
-                      onChange={(e) => {
-                        setModel(e.target.value);
-                        localStorage.setItem(MODEL_STORAGE, e.target.value);
-                      }}
-                      placeholder="vendor/model[:free]"
-                      className="h-8 text-xs font-mono"
-                    />
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    Pick from the list or type any OpenRouter model slug (e.g. append <code>:free</code>).
-                  </p>
-                  <label className="flex items-start gap-2 rounded-md border bg-muted/40 p-2 text-xs cursor-pointer">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5"
-                      checked={queryAllModels}
-                      onChange={(e) => setQueryAllModels(e.target.checked)}
-                    />
-                    <span>
-                      <span className="font-medium">Query ALL {models.length} listed models in parallel</span>
-                      <span className="block text-[10px] text-muted-foreground mt-0.5">
-                        For each image, fire one request per listed model concurrently (spreads across your OpenRouter keys). Best ISO-dated response wins; every attempt is logged in the Analysis report. Use to survive flaky/failing free models.
-                      </span>
-                    </span>
-                  </label>
-
-                  <div className="space-y-1 border-t pt-2">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs">AI prompt</Label>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-6 px-2 text-[10px]"
-                        onClick={() => {
-                          setCustomPrompt("");
-                          localStorage.removeItem(PROMPT_STORAGE);
-                        }}
-                        disabled={!customPrompt}
-                      >
-                        Reset to default
-                      </Button>
-                    </div>
-                    <textarea
-                      value={customPrompt || RECEIPT_PROMPT}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setCustomPrompt(val === RECEIPT_PROMPT ? "" : val);
-                        localStorage.setItem(PROMPT_STORAGE, val === RECEIPT_PROMPT ? "" : val);
-                      }}
-                      className="w-full rounded-md border bg-background px-2 py-1.5 text-xs font-mono resize-y leading-relaxed"
-                      rows={3}
-                    />
-                    <p className="text-[10px] text-muted-foreground">
-                      {(customPrompt || RECEIPT_PROMPT).length} chars
-                      {customPrompt ? " · custom" : " · default"}
-                    </p>
-                  </div>
-                </AccordionContent>
-              </AccordionItem>
-              )}
 
               {settings.visibleSections.years && (
               <AccordionItem value="years">
@@ -3082,8 +2832,6 @@ export function ReceiptApp() {
               [
                 ["actions", "Actions (AI, sort, download, export)"],
                 ["quality", "Quality & PDF size"],
-                ["keys", "OpenRouter API keys"],
-                ["models", "Model selector"],
                 ["years", "Manual tag year range"],
                 ["report-opts", "Report options"],
               ] as [SectionKey, string][]
