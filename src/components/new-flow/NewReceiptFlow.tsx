@@ -334,8 +334,8 @@ export function NewReceiptFlow() {
       const zip   = new JSZip();
 
       for (const it of tagged) {
-        // Canonical name: YYYYMMpart.jpeg (purely tag-based, no accumulative suffix)
-        const renamed = `${it.year}${it.month}${it.part}.jpeg`;
+        // Canonical name: y<year>_m<month>__p<part>.jpeg (purely tag-based)
+        const renamed = `y${it.year}_m${it.month}__p${it.part}.jpeg`;
         zip.file(renamed, await it.file.arrayBuffer());
       }
 
