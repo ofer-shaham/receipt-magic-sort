@@ -249,7 +249,7 @@ export function PdfToImagesFlow() {
         );
         const parts = await buildPdfsWithLimit(pdfItems, 10 * 1024 * 1024, { showLabel: true });
         parts.forEach((p, i) =>
-          triggerDownload(new Blob([p.bytes], { type: "application/pdf" }), `receipts-part${i + 1}.pdf`),
+          triggerDownload(new Blob([p.bytes as BlobPart], { type: "application/pdf" }), `receipts-part${i + 1}.pdf`),
         );
       }
       toast.success("Files generated!");
