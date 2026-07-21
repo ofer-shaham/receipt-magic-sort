@@ -332,14 +332,10 @@ export function NewReceiptFlow() {
     try {
       const JSZip = (await import("jszip")).default;
       const zip   = new JSZip();
-      const seen  = new Map<string, number>();
 
       for (const it of tagged) {
-        // Canonical name: MM_YYYY__part.jpeg
-        const base    = `${it.month}_${it.year}__${it.part}`;
-        const count   = seen.get(base) ?? 0;
-        const renamed = count === 0 ? `${base}.jpeg` : `${base}__${count + 1}.jpeg`;
-        seen.set(base, count + 1);
+        // Canonical name: YYYYMMpart.jpeg (purely tag-based, no accumulative suffix)
+        const renamed = `${it.year}${it.month}${it.part}.jpeg`;
         zip.file(renamed, await it.file.arrayBuffer());
       }
 
