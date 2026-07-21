@@ -470,9 +470,9 @@ export function NewReceiptFlow() {
 
   // ── CSV export ──────────────────────────────────────────────────────────────
 
-  // Export CSV name: {month}_{year}__{part}.csv
+  // Export CSV name: y<year>_m<month>__p<part>.csv
   const csvExportName = (item: StoreCsvItem) =>
-    `${item.month}_${item.year}__${item.part}.csv`;
+    `y${item.year}_m${item.month}__p${item.part}.csv`;
 
   const exportSingleCsv = (item: StoreCsvItem) => {
     const columns = item.extraction?.columns ?? [];
