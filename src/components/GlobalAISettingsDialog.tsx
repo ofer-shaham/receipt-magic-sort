@@ -20,7 +20,6 @@ import {
   fetchFreeVisionModelsList,
   fetchOpenRouterCredits,
   FREE_VISION_MODELS,
-  RECEIPT_PROMPT,
   type OpenRouterCredits,
 } from "@/lib/receipt-utils";
 
@@ -29,7 +28,6 @@ const KEYS_K        = "openrouter-api-keys-v2";
 const MODEL_K       = "openrouter-model";
 const MODELS_LIST_K = "openrouter-models-list";
 const SETTINGS_K    = "receipt-settings-v1";
-const PROMPT_K      = "receipt-prompt-v1";
 const QUERY_ALL_K   = "receipt-query-all-models";
 
 type AIProvider = "openrouter" | "gemini" | "auto";
@@ -106,7 +104,6 @@ export function GlobalAISettingsDialog({ open, onOpenChange }: Props) {
   const [models,        setModels]        = useState<string[]>([...FREE_VISION_MODELS]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [queryAll,      setQueryAll]      = useState(false);
-  const [customPrompt,  setCustomPrompt]  = useState("");
   const [credits,       setCredits]       = useState<OpenRouterCredits | null>(null);
   const [creditsLoading,setCreditsLoading]= useState(false);
 
@@ -118,7 +115,6 @@ export function GlobalAISettingsDialog({ open, onOpenChange }: Props) {
     setModel(localStorage.getItem(MODEL_K) || FREE_VISION_MODELS[0]);
     setModels(readModels());
     setQueryAll(localStorage.getItem(QUERY_ALL_K) === "true");
-    setCustomPrompt(localStorage.getItem(PROMPT_K) ?? "");
     setCredits(null);
   }, [open]);
 
@@ -188,20 +184,6 @@ export function GlobalAISettingsDialog({ open, onOpenChange }: Props) {
     localStorage.setItem(QUERY_ALL_K, String(v));
     notify();
   };
-
-  // ── prompt ──
-  const savePrompt = (val: string) => {
-    setCustomPrompt(val === RECEIPT_PROMPT ? "" : val);
-    if (val === RECEIPT_PROMPT) {
-      localStorage.removeItem(PROMPT_K);
-    } else {
-      localStorage.setItem(PROMPT_K, val);
-    }
-    notify();
-  };
-
-  const effectivePrompt = customPrompt || RECEIPT_PROMPT;
-  const isCustomPrompt  = !!customPrompt && customPrompt !== RECEIPT_PROMPT;
 
   // ── credits refresh ──
   const refreshCredits = () => {
@@ -413,31 +395,6 @@ export function GlobalAISettingsDialog({ open, onOpenChange }: Props) {
                 </span>
               </span>
             </label>
-          </section>
-
-          {/* ── AI Prompt ── */}
-          <section className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                AI Prompt
-              </Label>
-              <Button
-                size="sm" variant="ghost" className="h-6 px-2 text-[10px]"
-                onClick={() => savePrompt(RECEIPT_PROMPT)}
-                disabled={!isCustomPrompt}
-              >
-                Reset to default
-              </Button>
-            </div>
-            <textarea
-              value={effectivePrompt}
-              onChange={(e) => savePrompt(e.target.value)}
-              className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-xs font-mono leading-relaxed"
-              rows={4}
-            />
-            <p className="text-[10px] text-muted-foreground">
-              {effectivePrompt.length} chars{isCustomPrompt ? " · custom" : " · default"}
-            </p>
           </section>
 
         </div>
