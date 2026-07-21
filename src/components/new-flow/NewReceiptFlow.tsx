@@ -334,8 +334,8 @@ export function NewReceiptFlow() {
       const zip   = new JSZip();
 
       for (const it of tagged) {
-        // Canonical name: YYYYMMpart.jpeg (purely tag-based, no accumulative suffix)
-        const renamed = `${it.year}${it.month}${it.part}.jpeg`;
+        // Canonical name: y<year>_m<month>__p<part>.jpeg (purely tag-based)
+        const renamed = `y${it.year}_m${it.month}__p${it.part}.jpeg`;
         zip.file(renamed, await it.file.arrayBuffer());
       }
 
@@ -470,9 +470,9 @@ export function NewReceiptFlow() {
 
   // ── CSV export ──────────────────────────────────────────────────────────────
 
-  // Export CSV name: {month}_{year}__{part}.csv
+  // Export CSV name: y<year>_m<month>__p<part>.csv
   const csvExportName = (item: StoreCsvItem) =>
-    `${item.month}_${item.year}__${item.part}.csv`;
+    `y${item.year}_m${item.month}__p${item.part}.csv`;
 
   const exportSingleCsv = (item: StoreCsvItem) => {
     const columns = item.extraction?.columns ?? [];

@@ -34,7 +34,7 @@ export async function pdfToStitchedJpeg(
     const ctx = canvas.getContext("2d")!;
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    await page.render({ canvas, canvasContext: ctx, viewport: vp }).promise;
     canvases.push(canvas);
     totalHeight += canvas.height;
     maxWidth = Math.max(maxWidth, canvas.width);
