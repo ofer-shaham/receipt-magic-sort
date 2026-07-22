@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/accordion";
 import {
   useAppStore, type StoreImportedCsv, type StoreReportRow,
+  type CsvImportUiState,
 } from "@/contexts/AppStore";
 
 // ── Keyword chip colours ──────────────────────────────────────────────────────
@@ -215,25 +216,40 @@ function ExposeControl({ before, after, onBefore, onAfter, compact = false }: {
 export function CsvImportFlow() {
   const {
     importedCsvFiles, setImportedCsvFiles,
+    csvImportUi, setCsvImportUi,
     setReportRows, setReportColumns,
   } = useAppStore();
 
   const navigate = useNavigate();
 
-  const [sortDir,      setSortDir]      = useState<"asc"|"desc">("asc");
+  // All persistent UI state lives in the store so it survives tab navigation.
+  const {
+    sortDir, filterColumn, filterKeywords,
+    globalBefore, globalAfter, openItems, exposeOverrides,
+  } = csvImportUi;
+
+  /** Partial-update helper — merges a subset of CsvImportUiState. */
+  const setUi = (patch: Partial<CsvImportUiState>) =>
+    setCsvImportUi((prev) => ({ ...prev, ...patch }));
+
+  const setSortDir      = (v: "asc" | "desc" | ((p: "asc"|"desc") => "asc"|"desc")) =>
+    setUi({ sortDir: typeof v === "function" ? v(sortDir) : v });
+  const setFilterColumn   = (v: string) => setUi({ filterColumn: v });
+  const setFilterKeywords = (v: string[] | ((p: string[]) => string[])) =>
+    setUi({ filterKeywords: typeof v === "function" ? v(filterKeywords) : v });
+  const setGlobalBefore   = (v: number) => setUi({ globalBefore: v });
+  const setGlobalAfter    = (v: number) => setUi({ globalAfter: v });
+  const setOpenItems      = (v: string[] | ((p: string[]) => string[])) =>
+    setUi({ openItems: typeof v === "function" ? v(openItems) : v });
+  const setExposeOverrides = (v: Record<string, ExposeOverride> | ((p: Record<string, ExposeOverride>) => Record<string, ExposeOverride>)) =>
+    setUi({ exposeOverrides: typeof v === "function" ? v(exposeOverrides) : v });
+
+  // Transient-only state (doesn't need to survive navigation).
   const [loading,      setLoading]      = useState(false);
   const [zipExporting, setZipExporting] = useState(false);
-  const [openItems,    setOpenItems]    = useState<string[]>([]);
 
-  // ── multi-keyword filter ───────────────────────────────────────────────────
-  const [filterColumn,   setFilterColumn]   = useState("");
-  const [filterKeywords, setFilterKeywords] = useState<string[]>([]);   // committed chips
-  const [keywordInput,   setKeywordInput]   = useState("");             // input in progress
-
-  // ── expose ────────────────────────────────────────────────────────────────
-  const [globalBefore,    setGlobalBefore]    = useState(0);
-  const [globalAfter,     setGlobalAfter]     = useState(0);
-  const [exposeOverrides, setExposeOverrides] = useState<Record<string, ExposeOverride>>({});
+  // ── keyword input (transient) ─────────────────────────────────────────────
+  const [keywordInput, setKeywordInput] = useState("");
 
   const inputRef = useRef<HTMLInputElement>(null);
 
