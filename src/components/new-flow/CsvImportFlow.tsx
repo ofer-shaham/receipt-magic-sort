@@ -109,14 +109,24 @@ function tagKey(tag: StoreImportedCsv["tag"]): number {
 
 // ── CSV serialiser ────────────────────────────────────────────────────────────
 
-function serializeCsv(columns: string[], rows: string[][]): string {
+/**
+ * Serialise columns + rows to a CSV string.
+ * When cleanNullCells is true (default), any cell that is blank, "null",
+ * "undefined", "N/A", or "-" is written as an empty field instead.
+ */
+function serializeCsv(
+  columns: string[],
+  rows: string[][],
+  cleanNullCells = true,
+): string {
   const esc = (v: string | null | undefined) => {
-    const s = v == null ? "" : String(v);
+    let s = v == null ? "" : String(v);
+    if (cleanNullCells && isNullCell(s)) s = "";
     return s.includes(",") || s.includes('"') || s.includes("\n")
       ? `"${s.replace(/"/g, '""')}"` : s;
   };
   return [
-    columns.map(esc).join(","),
+    columns.map((c) => esc(c)).join(","),
     ...rows.map((r) => r.map(esc).join(",")),
   ].join("\n");
 }
