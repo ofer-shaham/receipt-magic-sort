@@ -1,7 +1,6 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-// Legacy URL — redirect to the crop & tag tab.
-export const Route = createFileRoute("/new/pdf-to-images")({
+export const Route = createFileRoute("/new/")({
   beforeLoad: () => { throw redirect({ to: "/new/crop-tag" }); },
   component: () => null,
 });

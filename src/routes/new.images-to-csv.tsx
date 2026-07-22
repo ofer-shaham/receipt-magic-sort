@@ -1,7 +1,7 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-// Sub-route preserved for backward compat; redirects to the unified /new flow.
+// Legacy URL — redirect to the new per-route path.
 export const Route = createFileRoute("/new/images-to-csv")({
-  beforeLoad: () => { throw redirect({ to: "/new" }); },
+  beforeLoad: () => { throw redirect({ to: "/new/image-csv" }); },
   component: () => null,
 });

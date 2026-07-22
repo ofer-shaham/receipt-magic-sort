@@ -52,7 +52,7 @@ export type StoreCsvItem = {
 // ── Default global columns hint ───────────────────────────────────────────────
 export const DEFAULT_COLUMNS_HINT = "יום,ערך,תיאור פעולה,אסמכתא,זכות,חובה,יתרה";
 
-// ── Imported CSV file (CSV Import tab) ────────────────────────────────────────
+// ── Imported CSV file (CSV Import/Export tab) ─────────────────────────────────
 
 export type StoreImportedCsv = {
   id:      string;
@@ -78,12 +78,9 @@ type AppStoreCtx = {
   // global CSV columns hint (shared across all extractions)
   csvColumnsHint:    string;
   setCsvColumnsHint: React.Dispatch<React.SetStateAction<string>>;
-  // /new — csv import
+  // /new — csv import/export
   importedCsvFiles:    StoreImportedCsv[];
   setImportedCsvFiles: React.Dispatch<React.SetStateAction<StoreImportedCsv[]>>;
-  // active internal tab in /new
-  newTab:    "crop" | "csv" | "csv-import";
-  setNewTab: React.Dispatch<React.SetStateAction<"crop" | "csv" | "csv-import">>;
 };
 
 const AppStore = createContext<AppStoreCtx | null>(null);
@@ -95,7 +92,6 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
   const [csvItems,         setCsvItems]         = useState<StoreCsvItem[]>([]);
   const [csvColumnsHint,   setCsvColumnsHint]   = useState<string>(DEFAULT_COLUMNS_HINT);
   const [importedCsvFiles, setImportedCsvFiles] = useState<StoreImportedCsv[]>([]);
-  const [newTab,           setNewTab]           = useState<"crop" | "csv" | "csv-import">("crop");
 
   return (
     <AppStore.Provider value={{
@@ -105,7 +101,6 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       csvItems, setCsvItems,
       csvColumnsHint, setCsvColumnsHint,
       importedCsvFiles, setImportedCsvFiles,
-      newTab, setNewTab,
     }}>
       {children}
     </AppStore.Provider>

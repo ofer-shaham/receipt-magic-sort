@@ -12,6 +12,10 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as NewRouteImport } from './routes/new'
 import { Route as OldRouteImport } from './routes/old'
+import { Route as NewIndexRouteImport } from './routes/new.index'
+import { Route as NewCropTagRouteImport } from './routes/new.crop-tag'
+import { Route as NewCsvExportRouteImport } from './routes/new.csv-export'
+import { Route as NewImageCsvRouteImport } from './routes/new.image-csv'
 import { Route as NewImagesToCsvRouteImport } from './routes/new.images-to-csv'
 import { Route as NewPdfToImagesRouteImport } from './routes/new.pdf-to-images'
 
@@ -30,6 +34,26 @@ const OldRoute = OldRouteImport.update({
   path: '/old',
   getParentRoute: () => rootRouteImport,
 } as any)
+const NewIndexRoute = NewIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => NewRoute,
+} as any)
+const NewCropTagRoute = NewCropTagRouteImport.update({
+  id: '/crop-tag',
+  path: '/crop-tag',
+  getParentRoute: () => NewRoute,
+} as any)
+const NewCsvExportRoute = NewCsvExportRouteImport.update({
+  id: '/csv-export',
+  path: '/csv-export',
+  getParentRoute: () => NewRoute,
+} as any)
+const NewImageCsvRoute = NewImageCsvRouteImport.update({
+  id: '/image-csv',
+  path: '/image-csv',
+  getParentRoute: () => NewRoute,
+} as any)
 const NewImagesToCsvRoute = NewImagesToCsvRouteImport.update({
   id: '/images-to-csv',
   path: '/images-to-csv',
@@ -45,36 +69,68 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/new': typeof NewRouteWithChildren
   '/old': typeof OldRoute
+  '/new/crop-tag': typeof NewCropTagRoute
+  '/new/csv-export': typeof NewCsvExportRoute
+  '/new/image-csv': typeof NewImageCsvRoute
   '/new/images-to-csv': typeof NewImagesToCsvRoute
   '/new/pdf-to-images': typeof NewPdfToImagesRoute
+  '/new/': typeof NewIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/new': typeof NewRouteWithChildren
   '/old': typeof OldRoute
+  '/new/crop-tag': typeof NewCropTagRoute
+  '/new/csv-export': typeof NewCsvExportRoute
+  '/new/image-csv': typeof NewImageCsvRoute
   '/new/images-to-csv': typeof NewImagesToCsvRoute
   '/new/pdf-to-images': typeof NewPdfToImagesRoute
+  '/new': typeof NewIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/new': typeof NewRouteWithChildren
   '/old': typeof OldRoute
+  '/new/crop-tag': typeof NewCropTagRoute
+  '/new/csv-export': typeof NewCsvExportRoute
+  '/new/image-csv': typeof NewImageCsvRoute
   '/new/images-to-csv': typeof NewImagesToCsvRoute
   '/new/pdf-to-images': typeof NewPdfToImagesRoute
+  '/new/': typeof NewIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/new' | '/old' | '/new/images-to-csv' | '/new/pdf-to-images'
+  fullPaths:
+    | '/'
+    | '/new'
+    | '/old'
+    | '/new/crop-tag'
+    | '/new/csv-export'
+    | '/new/image-csv'
+    | '/new/images-to-csv'
+    | '/new/pdf-to-images'
+    | '/new/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/new' | '/old' | '/new/images-to-csv' | '/new/pdf-to-images'
+  to:
+    | '/'
+    | '/old'
+    | '/new/crop-tag'
+    | '/new/csv-export'
+    | '/new/image-csv'
+    | '/new/images-to-csv'
+    | '/new/pdf-to-images'
+    | '/new'
   id:
     | '__root__'
     | '/'
     | '/new'
     | '/old'
+    | '/new/crop-tag'
+    | '/new/csv-export'
+    | '/new/image-csv'
     | '/new/images-to-csv'
     | '/new/pdf-to-images'
+    | '/new/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -106,6 +162,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OldRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/new/': {
+      id: '/new/'
+      path: '/'
+      fullPath: '/new/'
+      preLoaderRoute: typeof NewIndexRouteImport
+      parentRoute: typeof NewRoute
+    }
+    '/new/crop-tag': {
+      id: '/new/crop-tag'
+      path: '/crop-tag'
+      fullPath: '/new/crop-tag'
+      preLoaderRoute: typeof NewCropTagRouteImport
+      parentRoute: typeof NewRoute
+    }
+    '/new/csv-export': {
+      id: '/new/csv-export'
+      path: '/csv-export'
+      fullPath: '/new/csv-export'
+      preLoaderRoute: typeof NewCsvExportRouteImport
+      parentRoute: typeof NewRoute
+    }
+    '/new/image-csv': {
+      id: '/new/image-csv'
+      path: '/image-csv'
+      fullPath: '/new/image-csv'
+      preLoaderRoute: typeof NewImageCsvRouteImport
+      parentRoute: typeof NewRoute
+    }
     '/new/images-to-csv': {
       id: '/new/images-to-csv'
       path: '/images-to-csv'
@@ -124,13 +208,21 @@ declare module '@tanstack/react-router' {
 }
 
 interface NewRouteChildren {
+  NewCropTagRoute: typeof NewCropTagRoute
+  NewCsvExportRoute: typeof NewCsvExportRoute
+  NewImageCsvRoute: typeof NewImageCsvRoute
   NewImagesToCsvRoute: typeof NewImagesToCsvRoute
   NewPdfToImagesRoute: typeof NewPdfToImagesRoute
+  NewIndexRoute: typeof NewIndexRoute
 }
 
 const NewRouteChildren: NewRouteChildren = {
+  NewCropTagRoute: NewCropTagRoute,
+  NewCsvExportRoute: NewCsvExportRoute,
+  NewImageCsvRoute: NewImageCsvRoute,
   NewImagesToCsvRoute: NewImagesToCsvRoute,
   NewPdfToImagesRoute: NewPdfToImagesRoute,
+  NewIndexRoute: NewIndexRoute,
 }
 
 const NewRouteWithChildren = NewRoute._addFileChildren(NewRouteChildren)

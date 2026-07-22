@@ -1,6 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { NewReceiptFlow } from "@/components/new-flow/NewReceiptFlow";
+import { createFileRoute, Outlet } from "@tanstack/react-router";
 import { Toaster } from "@/components/ui/sonner";
+import { NewFlowLayout } from "@/components/new-flow/NewFlowLayout";
 
 export const Route = createFileRoute("/new")({
   component: NewPage,
@@ -9,7 +9,7 @@ export const Route = createFileRoute("/new")({
 function NewPage() {
   return (
     <>
-      <NewReceiptFlow />
+      <NewFlowLayout />
       <Toaster />
     </>
   );
