@@ -1,6 +1,6 @@
 /**
  * NewFlowLayout — layout shell for /new/* routes.
- * Renders the tab bar (router-linked) and an <Outlet /> for the active tab.
+ * Each tab is a TanStack Router Link so the URL always matches the active tab.
  */
 import { Link, Outlet, useMatchRoute } from "@tanstack/react-router";
 
@@ -28,6 +28,7 @@ export function NewFlowLayout() {
         <InlineTab to="/new/crop-tag">Crop &amp; Tag</InlineTab>
         <InlineTab to="/new/image-csv">Image → CSV</InlineTab>
         <InlineTab to="/new/csv-export">CSV Import/Export</InlineTab>
+        <InlineTab to="/new/report">Report</InlineTab>
       </div>
       <Outlet />
     </div>

@@ -18,6 +18,7 @@ import { Route as NewCsvExportRouteImport } from './routes/new.csv-export'
 import { Route as NewImageCsvRouteImport } from './routes/new.image-csv'
 import { Route as NewImagesToCsvRouteImport } from './routes/new.images-to-csv'
 import { Route as NewPdfToImagesRouteImport } from './routes/new.pdf-to-images'
+import { Route as NewReportRouteImport } from './routes/new.report'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -64,6 +65,11 @@ const NewPdfToImagesRoute = NewPdfToImagesRouteImport.update({
   path: '/pdf-to-images',
   getParentRoute: () => NewRoute,
 } as any)
+const NewReportRoute = NewReportRouteImport.update({
+  id: '/report',
+  path: '/report',
+  getParentRoute: () => NewRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -74,6 +80,7 @@ export interface FileRoutesByFullPath {
   '/new/image-csv': typeof NewImageCsvRoute
   '/new/images-to-csv': typeof NewImagesToCsvRoute
   '/new/pdf-to-images': typeof NewPdfToImagesRoute
+  '/new/report': typeof NewReportRoute
   '/new/': typeof NewIndexRoute
 }
 export interface FileRoutesByTo {
@@ -84,6 +91,7 @@ export interface FileRoutesByTo {
   '/new/image-csv': typeof NewImageCsvRoute
   '/new/images-to-csv': typeof NewImagesToCsvRoute
   '/new/pdf-to-images': typeof NewPdfToImagesRoute
+  '/new/report': typeof NewReportRoute
   '/new': typeof NewIndexRoute
 }
 export interface FileRoutesById {
@@ -96,6 +104,7 @@ export interface FileRoutesById {
   '/new/image-csv': typeof NewImageCsvRoute
   '/new/images-to-csv': typeof NewImagesToCsvRoute
   '/new/pdf-to-images': typeof NewPdfToImagesRoute
+  '/new/report': typeof NewReportRoute
   '/new/': typeof NewIndexRoute
 }
 export interface FileRouteTypes {
@@ -109,6 +118,7 @@ export interface FileRouteTypes {
     | '/new/image-csv'
     | '/new/images-to-csv'
     | '/new/pdf-to-images'
+    | '/new/report'
     | '/new/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -119,6 +129,7 @@ export interface FileRouteTypes {
     | '/new/image-csv'
     | '/new/images-to-csv'
     | '/new/pdf-to-images'
+    | '/new/report'
     | '/new'
   id:
     | '__root__'
@@ -130,6 +141,7 @@ export interface FileRouteTypes {
     | '/new/image-csv'
     | '/new/images-to-csv'
     | '/new/pdf-to-images'
+    | '/new/report'
     | '/new/'
   fileRoutesById: FileRoutesById
 }
@@ -204,6 +216,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof NewPdfToImagesRouteImport
       parentRoute: typeof NewRoute
     }
+    '/new/report': {
+      id: '/new/report'
+      path: '/report'
+      fullPath: '/new/report'
+      preLoaderRoute: typeof NewReportRouteImport
+      parentRoute: typeof NewRoute
+    }
   }
 }
 
@@ -213,6 +232,7 @@ interface NewRouteChildren {
   NewImageCsvRoute: typeof NewImageCsvRoute
   NewImagesToCsvRoute: typeof NewImagesToCsvRoute
   NewPdfToImagesRoute: typeof NewPdfToImagesRoute
+  NewReportRoute: typeof NewReportRoute
   NewIndexRoute: typeof NewIndexRoute
 }
 
@@ -222,6 +242,7 @@ const NewRouteChildren: NewRouteChildren = {
   NewImageCsvRoute: NewImageCsvRoute,
   NewImagesToCsvRoute: NewImagesToCsvRoute,
   NewPdfToImagesRoute: NewPdfToImagesRoute,
+  NewReportRoute: NewReportRoute,
   NewIndexRoute: NewIndexRoute,
 }
 

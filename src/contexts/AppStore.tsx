@@ -62,6 +62,16 @@ export type StoreImportedCsv = {
   rows:    string[][];
 };
 
+// ── Report (generated from CSV Import/Export) ─────────────────────────────────
+
+export type StoreReportRow = {
+  id:        string;
+  filename:  string;
+  cells:     string[];
+  isContext: boolean; // true = exposed context row, false = direct keyword match
+  notes:     string;
+};
+
 // ── Context ───────────────────────────────────────────────────────────────────
 
 type AppStoreCtx = {
@@ -81,6 +91,11 @@ type AppStoreCtx = {
   // /new — csv import/export
   importedCsvFiles:    StoreImportedCsv[];
   setImportedCsvFiles: React.Dispatch<React.SetStateAction<StoreImportedCsv[]>>;
+  // /new — report (generated from csv import/export, shown in /new/report)
+  reportRows:      StoreReportRow[];
+  setReportRows:   React.Dispatch<React.SetStateAction<StoreReportRow[]>>;
+  reportColumns:   string[];
+  setReportColumns: React.Dispatch<React.SetStateAction<string[]>>;
 };
 
 const AppStore = createContext<AppStoreCtx | null>(null);
@@ -92,6 +107,8 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
   const [csvItems,         setCsvItems]         = useState<StoreCsvItem[]>([]);
   const [csvColumnsHint,   setCsvColumnsHint]   = useState<string>(DEFAULT_COLUMNS_HINT);
   const [importedCsvFiles, setImportedCsvFiles] = useState<StoreImportedCsv[]>([]);
+  const [reportRows,       setReportRows]       = useState<StoreReportRow[]>([]);
+  const [reportColumns,    setReportColumns]    = useState<string[]>([]);
 
   return (
     <AppStore.Provider value={{
@@ -101,6 +118,8 @@ export function AppStoreProvider({ children }: { children: React.ReactNode }) {
       csvItems, setCsvItems,
       csvColumnsHint, setCsvColumnsHint,
       importedCsvFiles, setImportedCsvFiles,
+      reportRows, setReportRows,
+      reportColumns, setReportColumns,
     }}>
       {children}
     </AppStore.Provider>

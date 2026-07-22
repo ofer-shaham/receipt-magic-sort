@@ -1,47 +1,44 @@
 /**
  * CsvImportFlow — "CSV Import/Export" tab at /new/csv-export.
  *
- * Features:
- * • Drop .csv / .zip archives; parse in-browser (no upload).
- * • Infers year:month:part tag from filename.
- * • Accordion list sorted by tag; auto-expands matches.
- * • Filter by column + keyword with matched-row highlighting.
- * • Expose X rows before / Y rows after each match (global + per-table override).
- * • Column-schema validation across files (shows warning when schemas differ).
- * • Generate report: merged table (filename | ...cols | notes) from all
- *   filtered+exposed rows; notes column is editable; export as CSV.
+ * • Drop .csv / .zip — parsed in-browser, no upload.
+ * • Multi-keyword filter (OR union) with per-keyword colour highlighting.
+ * • Expose X/Y context rows around matches — global + per-table override.
+ * • Column-schema validation banner.
+ * • "Generate report" → stores merged table in AppStore → navigates to /new/report.
  * • Per-file and bulk null-row stripping; bulk ZIP export.
  */
 import { useState, useCallback, useRef, useMemo } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import {
   FileSpreadsheet, FileArchive,
   ArrowUp, ArrowDown,
   Download, Trash2, X, Loader2, Filter, Eraser,
-  AlertTriangle, ChevronDown, ChevronUp, TableProperties,
-  SlidersHorizontal,
+  AlertTriangle, TableProperties, SlidersHorizontal, Plus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
+  Accordion, AccordionContent, AccordionItem, AccordionTrigger,
 } from "@/components/ui/accordion";
-import { useAppStore, type StoreImportedCsv } from "@/contexts/AppStore";
-import { toCsv } from "@/lib/new-flow/csv-extract";
-import { timestamp } from "@/lib/receipt-utils";
+import {
+  useAppStore, type StoreImportedCsv, type StoreReportRow,
+} from "@/contexts/AppStore";
+
+// ── Keyword chip colours ──────────────────────────────────────────────────────
+
+const KW_COLORS = [
+  { bg: "bg-yellow-100 dark:bg-yellow-800/60", text: "text-yellow-800 dark:text-yellow-200", mark: "bg-yellow-200 text-yellow-900 dark:bg-yellow-700 dark:text-yellow-100" },
+  { bg: "bg-blue-100 dark:bg-blue-800/60",    text: "text-blue-800 dark:text-blue-200",    mark: "bg-blue-200 text-blue-900 dark:bg-blue-700 dark:text-blue-100" },
+  { bg: "bg-green-100 dark:bg-green-800/60",  text: "text-green-800 dark:text-green-200",  mark: "bg-green-200 text-green-900 dark:bg-green-700 dark:text-green-100" },
+  { bg: "bg-rose-100 dark:bg-rose-800/60",    text: "text-rose-800 dark:text-rose-200",    mark: "bg-rose-200 text-rose-900 dark:bg-rose-700 dark:text-rose-100" },
+  { bg: "bg-purple-100 dark:bg-purple-800/60",text: "text-purple-800 dark:text-purple-200",mark: "bg-purple-200 text-purple-900 dark:bg-purple-700 dark:text-purple-100" },
+  { bg: "bg-orange-100 dark:bg-orange-800/60",text: "text-orange-800 dark:text-orange-200",mark: "bg-orange-200 text-orange-900 dark:bg-orange-700 dark:text-orange-100" },
+];
+const kwColor = (i: number) => KW_COLORS[i % KW_COLORS.length];
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-
-type ReportRow = {
-  id: string;
-  filename: string;
-  cells: string[];
-  isContext: boolean; // true = context/expose row, false = direct match
-  notes: string;
-};
 
 type ExposeOverride = { before: number; after: number };
 
@@ -50,27 +47,22 @@ type ExposeOverride = { before: number; after: number };
 function parseCsvText(raw: string): { columns: string[]; rows: string[][] } {
   const text = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const records: string[][] = [];
-  let i = 0;
-  const n = text.length;
-
+  let i = 0, n = text.length;
   while (i < n) {
     const record: string[] = [];
     while (i < n && text[i] !== "\n") {
       if (text[i] === '"') {
-        let field = "";
-        i++;
+        let f = ""; i++;
         while (i < n) {
-          if (text[i] === '"') {
-            if (text[i + 1] === '"') { field += '"'; i += 2; }
-            else { i++; break; }
-          } else { field += text[i++]; }
+          if (text[i] === '"') { if (text[i+1] === '"') { f += '"'; i += 2; } else { i++; break; } }
+          else f += text[i++];
         }
-        record.push(field);
+        record.push(f);
         if (i < n && text[i] === ",") i++;
       } else {
-        let field = "";
-        while (i < n && text[i] !== "," && text[i] !== "\n") field += text[i++];
-        record.push(field);
+        let f = "";
+        while (i < n && text[i] !== "," && text[i] !== "\n") f += text[i++];
+        record.push(f);
         if (i < n && text[i] === ",") i++;
       }
     }
@@ -78,16 +70,14 @@ function parseCsvText(raw: string): { columns: string[]; rows: string[][] } {
     if (record.length === 1 && record[0] === "") continue;
     if (record.length > 0) records.push(record);
   }
-
-  if (records.length === 0) return { columns: [], rows: [] };
+  if (!records.length) return { columns: [], rows: [] };
   return { columns: records[0], rows: records.slice(1) };
 }
 
 // ── Tag parser ────────────────────────────────────────────────────────────────
 
 const CURR_YEAR = String(new Date().getFullYear());
-
-function parseTagFromFilename(name: string): { year: string; month: string; part: string } {
+function parseTagFromFilename(name: string) {
   const m1 = name.match(/y(\d{4})_m(\d{2})__p(\d+)/i);
   if (m1) return { year: m1[1], month: m1[2], part: m1[3] };
   const m2 = name.match(/y(\d{4})_m(\d{2})/i);
@@ -99,39 +89,11 @@ function parseTagFromFilename(name: string): { year: string; month: string; part
   return { year: CURR_YEAR, month: "01", part: "1" };
 }
 
-// ── Sort key ──────────────────────────────────────────────────────────────────
-
-function tagKey(tag: StoreImportedCsv["tag"]): number {
-  return parseInt(tag.year, 10) * 10000
-       + parseInt(tag.month, 10) * 100
-       + parseInt(tag.part,  10);
+function tagKey(tag: StoreImportedCsv["tag"]) {
+  return parseInt(tag.year,10)*10000 + parseInt(tag.month,10)*100 + parseInt(tag.part,10);
 }
 
 // ── CSV serialiser ────────────────────────────────────────────────────────────
-
-/**
- * Serialise columns + rows to a CSV string.
- * When cleanNullCells is true (default), any cell that is blank, "null",
- * "undefined", "N/A", or "-" is written as an empty field instead.
- */
-function serializeCsv(
-  columns: string[],
-  rows: string[][],
-  cleanNullCells = true,
-): string {
-  const esc = (v: string | null | undefined) => {
-    let s = v == null ? "" : String(v);
-    if (cleanNullCells && isNullCell(s)) s = "";
-    return s.includes(",") || s.includes('"') || s.includes("\n")
-      ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  return [
-    columns.map((c) => esc(c)).join(","),
-    ...rows.map((r) => r.map(esc).join(",")),
-  ].join("\n");
-}
-
-// ── Null-value helpers ────────────────────────────────────────────────────────
 
 function isNullCell(v: string): boolean {
   const t = (v ?? "").trim().toLowerCase();
@@ -142,80 +104,91 @@ function stripNullRows(rows: string[][]): string[][] {
   return rows.filter((row) => !row.every((v) => isNullCell(v)));
 }
 
-// ── Filter + expose helpers ───────────────────────────────────────────────────
-
-/** Returns indices of rows that match the filter. */
-function getMatchingIndices(item: StoreImportedCsv, col: string, kw: string): number[] {
-  const colTrim = col.trim();
-  const kwTrim  = kw.trim();
-  if (!colTrim || !kwTrim) return item.rows.map((_, i) => i);
-  const colIdx = item.columns.findIndex(
-    (c) => c.toLowerCase() === colTrim.toLowerCase(),
-  );
-  if (colIdx === -1) return [];
-  const kwLower = kwTrim.toLowerCase();
-  return item.rows.reduce<number[]>((acc, row, i) => {
-    if ((row[colIdx] ?? "").toLowerCase().includes(kwLower)) acc.push(i);
-    return acc;
-  }, []);
+/**
+ * Serialise to CSV. cleanNullCells=true (default) replaces null-like cells with "".
+ */
+function serializeCsv(columns: string[], rows: string[][], cleanNullCells = true): string {
+  const esc = (v: string | null | undefined) => {
+    let s = v == null ? "" : String(v);
+    if (cleanNullCells && isNullCell(s)) s = "";
+    return s.includes(",") || s.includes('"') || s.includes("\n")
+      ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return [columns.map(esc).join(","), ...rows.map((r) => r.map(esc).join(","))].join("\n");
 }
 
-/** Expands matched indices by exposeBefore / exposeAfter, returning sorted unique indices. */
+// ── Filter + expose helpers ───────────────────────────────────────────────────
+
+/**
+ * Returns the indices of rows in `item` whose value in `col` matches ANY of
+ * the keywords (case-insensitive substring, OR union).
+ * If col or keywords are empty, returns all indices.
+ */
+function getMatchingIndices(
+  item: StoreImportedCsv,
+  col: string,
+  keywords: string[],
+): number[] {
+  const colTrim = col.trim();
+  const kws = keywords.map((k) => k.trim().toLowerCase()).filter(Boolean);
+  if (!colTrim || !kws.length) return item.rows.map((_, i) => i);
+  const colIdx = item.columns.findIndex((c) => c.toLowerCase() === colTrim.toLowerCase());
+  if (colIdx === -1) return [];
+  const result = new Set<number>();
+  item.rows.forEach((row, i) => {
+    const cell = (row[colIdx] ?? "").toLowerCase();
+    if (kws.some((kw) => cell.includes(kw))) result.add(i);
+  });
+  return [...result].sort((a, b) => a - b);
+}
+
+/** Returns which keyword (index) matches this cell value, or -1. */
+function matchingKeywordIndex(val: string, keywords: string[]): number {
+  const lower = val.toLowerCase();
+  for (let i = 0; i < keywords.length; i++) {
+    if (keywords[i].trim() && lower.includes(keywords[i].trim().toLowerCase())) return i;
+  }
+  return -1;
+}
+
 function expandWithContext(
-  matchIndices: number[],
-  totalRows: number,
-  before: number,
-  after: number,
+  matchIndices: number[], totalRows: number, before: number, after: number,
 ): { index: number; isMatch: boolean }[] {
-  if (matchIndices.length === 0) return [];
+  if (!matchIndices.length) return [];
   const matchSet = new Set(matchIndices);
   const included = new Set<number>();
   for (const idx of matchIndices) {
-    for (let j = Math.max(0, idx - before); j <= Math.min(totalRows - 1, idx + after); j++) {
-      included.add(j);
-    }
+    for (let j = Math.max(0, idx-before); j <= Math.min(totalRows-1, idx+after); j++) included.add(j);
   }
-  return Array.from(included)
-    .sort((a, b) => a - b)
-    .map((index) => ({ index, isMatch: matchSet.has(index) }));
+  return [...included].sort((a,b)=>a-b).map((index) => ({ index, isMatch: matchSet.has(index) }));
 }
 
-/** Returns rows + isMatch flag for a given item + filter + expose settings. */
 function getDisplayRows(
-  item: StoreImportedCsv,
-  col: string,
-  kw: string,
-  before: number,
-  after: number,
-  filterActive: boolean,
+  item: StoreImportedCsv, col: string, keywords: string[],
+  before: number, after: number, filterActive: boolean,
 ): { row: string[]; isMatch: boolean }[] {
   if (!filterActive) return item.rows.map((row) => ({ row, isMatch: false }));
-  const matchIdx = getMatchingIndices(item, col, kw);
-  const expanded  = expandWithContext(matchIdx, item.rows.length, before, after);
+  const matchIdx = getMatchingIndices(item, col, keywords);
+  const expanded = expandWithContext(matchIdx, item.rows.length, before, after);
   return expanded.map(({ index, isMatch }) => ({ row: item.rows[index], isMatch }));
 }
 
-// ── Column-schema validation ──────────────────────────────────────────────────
+// ── Schema validation ─────────────────────────────────────────────────────────
 
 type SchemaMismatch = { name: string; columns: string[] };
-
 function validateSchemas(files: StoreImportedCsv[]): SchemaMismatch[] {
   if (files.length < 2) return [];
   const ref = files[0].columns.join("\0");
-  return files
-    .filter((f) => f.columns.join("\0") !== ref)
-    .map((f) => ({ name: f.name, columns: f.columns }));
+  return files.filter((f) => f.columns.join("\0") !== ref).map((f) => ({ name: f.name, columns: f.columns }));
 }
 
-// ── uid ───────────────────────────────────────────────────────────────────────
+// ── Misc ──────────────────────────────────────────────────────────────────────
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
 // ── Expose control ────────────────────────────────────────────────────────────
 
-function ExposeControl({
-  before, after, onBefore, onAfter, compact = false,
-}: {
+function ExposeControl({ before, after, onBefore, onAfter, compact = false }: {
   before: number; after: number;
   onBefore: (v: number) => void; onAfter: (v: number) => void;
   compact?: boolean;
@@ -227,17 +200,11 @@ function ExposeControl({
     <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
       <SlidersHorizontal className={compact ? "h-3 w-3" : "h-3.5 w-3.5"} />
       <span>Expose</span>
-      <input
-        type="number" min={0} max={50} value={before}
-        onChange={(e) => onBefore(Math.max(0, Math.min(50, Number(e.target.value) || 0)))}
-        className={cls} title="Rows before each match"
-      />
+      <input type="number" min={0} max={50} value={before} className={cls} title="Rows before each match"
+        onChange={(e) => onBefore(Math.max(0, Math.min(50, Number(e.target.value) || 0)))} />
       <span>before</span>
-      <input
-        type="number" min={0} max={50} value={after}
-        onChange={(e) => onAfter(Math.max(0, Math.min(50, Number(e.target.value) || 0)))}
-        className={cls} title="Rows after each match"
-      />
+      <input type="number" min={0} max={50} value={after} className={cls} title="Rows after each match"
+        onChange={(e) => onAfter(Math.max(0, Math.min(50, Number(e.target.value) || 0)))} />
       <span>after</span>
     </div>
   );
@@ -246,165 +213,138 @@ function ExposeControl({
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function CsvImportFlow() {
-  const { importedCsvFiles, setImportedCsvFiles } = useAppStore();
+  const {
+    importedCsvFiles, setImportedCsvFiles,
+    setReportRows, setReportColumns,
+  } = useAppStore();
 
-  const [sortDir,      setSortDir]      = useState<"asc" | "desc">("asc");
+  const navigate = useNavigate();
+
+  const [sortDir,      setSortDir]      = useState<"asc"|"desc">("asc");
   const [loading,      setLoading]      = useState(false);
   const [zipExporting, setZipExporting] = useState(false);
+  const [openItems,    setOpenItems]    = useState<string[]>([]);
 
-  // ── accordion ─────────────────────────────────────────────────────────────
-  const [openItems, setOpenItems] = useState<string[]>([]);
+  // ── multi-keyword filter ───────────────────────────────────────────────────
+  const [filterColumn,   setFilterColumn]   = useState("");
+  const [filterKeywords, setFilterKeywords] = useState<string[]>([]);   // committed chips
+  const [keywordInput,   setKeywordInput]   = useState("");             // input in progress
 
-  // ── filter ────────────────────────────────────────────────────────────────
-  const [filterColumn,  setFilterColumn]  = useState("");
-  const [filterKeyword, setFilterKeyword] = useState("");
-
-  // ── expose (global) ───────────────────────────────────────────────────────
-  const [globalBefore, setGlobalBefore] = useState(0);
-  const [globalAfter,  setGlobalAfter]  = useState(0);
-
-  // ── expose (per-item override) ────────────────────────────────────────────
+  // ── expose ────────────────────────────────────────────────────────────────
+  const [globalBefore,    setGlobalBefore]    = useState(0);
+  const [globalAfter,     setGlobalAfter]     = useState(0);
   const [exposeOverrides, setExposeOverrides] = useState<Record<string, ExposeOverride>>({});
-
-  // ── report ────────────────────────────────────────────────────────────────
-  const [reportRows,    setReportRows]    = useState<ReportRow[]>([]);
-  const [reportColumns, setReportColumns] = useState<string[]>([]);
-  const [showReport,    setShowReport]    = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
 
   // ── derived ───────────────────────────────────────────────────────────────
 
   const sorted = [...importedCsvFiles].sort((a, b) => {
-    const diff = tagKey(a.tag) - tagKey(b.tag);
-    return sortDir === "asc" ? diff : -diff;
+    const d = tagKey(a.tag) - tagKey(b.tag);
+    return sortDir === "asc" ? d : -d;
   });
 
-  const isFilterActive = filterColumn.trim() !== "" && filterKeyword.trim() !== "";
+  const isFilterActive = filterColumn.trim() !== "" && filterKeywords.length > 0;
 
-  const schemaMismatches = useMemo(
-    () => validateSchemas(importedCsvFiles),
-    [importedCsvFiles],
-  );
+  const schemaMismatches = useMemo(() => validateSchemas(importedCsvFiles), [importedCsvFiles]);
 
-  // ── filter/expose helpers ─────────────────────────────────────────────────
+  // ── expose helpers ────────────────────────────────────────────────────────
 
   const getItemExpose = (id: string) =>
     exposeOverrides[id] ?? { before: globalBefore, after: globalAfter };
 
   const setItemExpose = (id: string, val: Partial<ExposeOverride>) =>
-    setExposeOverrides((prev) => ({
-      ...prev,
-      [id]: { ...getItemExpose(id), ...val },
-    }));
+    setExposeOverrides((prev) => ({ ...prev, [id]: { ...getItemExpose(id), ...val } }));
 
   const clearItemExposeOverride = (id: string) =>
     setExposeOverrides((prev) => { const n = { ...prev }; delete n[id]; return n; });
 
+  // ── keyword helpers ───────────────────────────────────────────────────────
+
   const autoExpandMatches = useCallback(
-    (col: string, kw: string, items: StoreImportedCsv[]) => {
-      if (!col.trim() || !kw.trim()) return;
-      const matchedIds = items
-        .filter((it) => getMatchingIndices(it, col, kw).length > 0)
-        .map((it) => it.id);
-      if (matchedIds.length) {
-        setOpenItems((prev) => [...new Set([...prev, ...matchedIds])]);
-      }
+    (col: string, kws: string[], items: StoreImportedCsv[]) => {
+      if (!col.trim() || !kws.length) return;
+      const ids = items.filter((it) => getMatchingIndices(it, col, kws).length > 0).map((it) => it.id);
+      if (ids.length) setOpenItems((prev) => [...new Set([...prev, ...ids])]);
     },
     [],
   );
 
+  const commitKeyword = useCallback((raw: string) => {
+    const kw = raw.trim();
+    if (!kw || filterKeywords.includes(kw)) { setKeywordInput(""); return; }
+    const next = [...filterKeywords, kw];
+    setFilterKeywords(next);
+    setKeywordInput("");
+    autoExpandMatches(filterColumn, next, sorted);
+  }, [filterKeywords, filterColumn, sorted, autoExpandMatches]);
+
+  const removeKeyword = (kw: string) => {
+    const next = filterKeywords.filter((k) => k !== kw);
+    setFilterKeywords(next);
+  };
+
+  const onKeywordKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" || e.key === ",") { e.preventDefault(); commitKeyword(keywordInput); }
+    if (e.key === "Backspace" && !keywordInput && filterKeywords.length) {
+      removeKeyword(filterKeywords[filterKeywords.length - 1]);
+    }
+  };
+
   const onFilterColumnChange = (val: string) => {
     setFilterColumn(val);
-    autoExpandMatches(val, filterKeyword, sorted);
+    autoExpandMatches(val, filterKeywords, sorted);
   };
 
-  const onFilterKeywordChange = (val: string) => {
-    setFilterKeyword(val);
-    autoExpandMatches(filterColumn, val, sorted);
-  };
-
-  const clearFilter = () => {
-    setFilterColumn("");
-    setFilterKeyword("");
-  };
+  const clearFilter = () => { setFilterColumn(""); setFilterKeywords([]); setKeywordInput(""); };
 
   // ── filter summary ────────────────────────────────────────────────────────
 
   const filterStats = isFilterActive
-    ? sorted.reduce(
-        (acc, item) => {
-          const { before, after } = getItemExpose(item.id);
-          const displayed = getDisplayRows(item, filterColumn, filterKeyword, before, after, true);
-          const matches = displayed.filter((r) => r.isMatch).length;
-          return {
-            total: acc.total + matches,
-            exposed: acc.exposed + displayed.filter((r) => !r.isMatch).length,
-            files: acc.files + (matches > 0 ? 1 : 0),
-          };
-        },
-        { total: 0, exposed: 0, files: 0 },
-      )
+    ? sorted.reduce((acc, item) => {
+        const { before, after } = getItemExpose(item.id);
+        const disp = getDisplayRows(item, filterColumn, filterKeywords, before, after, true);
+        const m = disp.filter((r) => r.isMatch).length;
+        return { total: acc.total + m, exposed: acc.exposed + disp.filter((r) => !r.isMatch).length, files: acc.files + (m>0?1:0) };
+      }, { total: 0, exposed: 0, files: 0 })
     : null;
 
   // ── file ingestion ────────────────────────────────────────────────────────
 
-  const addFiles = useCallback(
-    async (rawFiles: File[]) => {
-      setLoading(true);
-      const newItems: StoreImportedCsv[] = [];
-
-      for (const file of rawFiles) {
-        const lname = file.name.toLowerCase();
-
-        if (lname.endsWith(".csv")) {
-          try {
-            const text = await file.text();
-            const { columns, rows } = parseCsvText(text);
-            newItems.push({ id: uid(), name: file.name, tag: parseTagFromFilename(file.name), columns, rows });
-          } catch (e: any) {
-            toast.error(`Could not parse ${file.name}: ${e?.message ?? e}`);
+  const addFiles = useCallback(async (rawFiles: File[]) => {
+    setLoading(true);
+    const newItems: StoreImportedCsv[] = [];
+    for (const file of rawFiles) {
+      const lname = file.name.toLowerCase();
+      if (lname.endsWith(".csv")) {
+        try {
+          const { columns, rows } = parseCsvText(await file.text());
+          newItems.push({ id: uid(), name: file.name, tag: parseTagFromFilename(file.name), columns, rows });
+        } catch (e: any) { toast.error(`Could not parse ${file.name}: ${e?.message ?? e}`); }
+      } else if (lname.endsWith(".zip") || file.type.includes("zip")) {
+        try {
+          const JSZip = (await import("jszip")).default;
+          const zip = await JSZip.loadAsync(file);
+          const entries = Object.entries(zip.files).filter(([n, e]) => !e.dir && n.toLowerCase().endsWith(".csv"));
+          for (const [entryName, entry] of entries) {
+            try {
+              const { columns, rows } = parseCsvText(await entry.async("text"));
+              const baseName = entryName.split("/").pop() ?? entryName;
+              newItems.push({ id: uid(), name: baseName, tag: parseTagFromFilename(baseName), columns, rows });
+            } catch (e: any) { toast.error(`Could not parse ${entryName}: ${e?.message ?? e}`); }
           }
-        } else if (
-          lname.endsWith(".zip") ||
-          file.type === "application/zip" ||
-          file.type === "application/x-zip-compressed"
-        ) {
-          try {
-            const JSZip = (await import("jszip")).default;
-            const zip   = await JSZip.loadAsync(file);
-            const entries = Object.entries(zip.files).filter(
-              ([n, e]) => !e.dir && n.toLowerCase().endsWith(".csv"),
-            );
-            for (const [entryName, entry] of entries) {
-              try {
-                const text     = await entry.async("text");
-                const { columns, rows } = parseCsvText(text);
-                const baseName = entryName.split("/").pop() ?? entryName;
-                newItems.push({ id: uid(), name: baseName, tag: parseTagFromFilename(baseName), columns, rows });
-              } catch (e: any) {
-                toast.error(`Could not parse ${entryName}: ${e?.message ?? e}`);
-              }
-            }
-          } catch (e: any) {
-            toast.error(`Could not read ${file.name}: ${e?.message ?? e}`);
-          }
-        }
+        } catch (e: any) { toast.error(`Could not read ${file.name}: ${e?.message ?? e}`); }
       }
-
-      if (newItems.length) {
-        setImportedCsvFiles((prev) => [...prev, ...newItems]);
-        toast.success(`Loaded ${newItems.length} CSV file${newItems.length !== 1 ? "s" : ""}.`);
-        if (filterColumn.trim() && filterKeyword.trim()) {
-          autoExpandMatches(filterColumn, filterKeyword, newItems);
-        }
-      } else if (rawFiles.length > 0) {
-        toast.warning("No CSV files found in the dropped files.");
-      }
-      setLoading(false);
-    },
-    [setImportedCsvFiles, filterColumn, filterKeyword, autoExpandMatches],
-  );
+    }
+    if (newItems.length) {
+      setImportedCsvFiles((prev) => [...prev, ...newItems]);
+      toast.success(`Loaded ${newItems.length} CSV file${newItems.length !== 1 ? "s" : ""}.`);
+      if (filterColumn.trim() && filterKeywords.length) autoExpandMatches(filterColumn, filterKeywords, newItems);
+    } else if (rawFiles.length > 0) {
+      toast.warning("No CSV files found in the dropped files.");
+    }
+    setLoading(false);
+  }, [setImportedCsvFiles, filterColumn, filterKeywords, autoExpandMatches]);
 
   const onDrop = useCallback(
     (e: React.DragEvent) => { e.preventDefault(); addFiles(Array.from(e.dataTransfer.files)); },
@@ -414,79 +354,59 @@ export function CsvImportFlow() {
   // ── per-item download ─────────────────────────────────────────────────────
 
   const downloadItem = (item: StoreImportedCsv) => {
-    const csv = serializeCsv(item.columns, item.rows);
-    const a   = document.createElement("a");
-    a.href    = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([serializeCsv(item.columns, item.rows)], { type: "text/csv" }));
     a.download = item.name;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 15_000);
   };
 
-  // ── export all as ZIP ─────────────────────────────────────────────────────
+  // ── export all ZIP ────────────────────────────────────────────────────────
 
   const exportAllZip = useCallback(async () => {
     if (!importedCsvFiles.length) return;
     setZipExporting(true);
     try {
       const JSZip = (await import("jszip")).default;
-      const zip   = new JSZip();
-      let totalStripped = 0;
+      const zip = new JSZip();
+      let stripped = 0;
       for (const item of importedCsvFiles) {
-        const cleanRows = stripNullRows(item.rows);
-        totalStripped  += item.rows.length - cleanRows.length;
-        zip.file(item.name, serializeCsv(item.columns, cleanRows));
+        const clean = stripNullRows(item.rows);
+        stripped += item.rows.length - clean.length;
+        zip.file(item.name, serializeCsv(item.columns, clean));
       }
       const blob = await zip.generateAsync({ type: "blob" });
-      const a    = document.createElement("a");
-      a.href     = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
       a.download = `csv-import-${Date.now()}.zip`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 15_000);
-      toast.success(
-        `Exported ${importedCsvFiles.length} file${importedCsvFiles.length !== 1 ? "s" : ""}` +
-        (totalStripped > 0 ? ` · ${totalStripped} null row${totalStripped !== 1 ? "s" : ""} removed` : ""),
-      );
-    } catch (e: any) {
-      toast.error(`Export failed: ${e?.message ?? e}`);
-    }
+      toast.success(`Exported ${importedCsvFiles.length} file${importedCsvFiles.length !== 1 ? "s" : ""}` +
+        (stripped > 0 ? ` · ${stripped} null row${stripped !== 1 ? "s" : ""} removed` : ""));
+    } catch (e: any) { toast.error(`Export failed: ${e?.message ?? e}`); }
     setZipExporting(false);
   }, [importedCsvFiles]);
 
   // ── strip null rows ───────────────────────────────────────────────────────
 
   const stripNullRowsForItem = (id: string) => {
-    setImportedCsvFiles((prev) =>
-      prev.map((it) => {
-        if (it.id !== id) return it;
-        const before = it.rows.length;
-        const cleaned = stripNullRows(it.rows);
-        const removed = before - cleaned.length;
-        toast.success(
-          removed > 0
-            ? `Stripped ${removed} null row${removed !== 1 ? "s" : ""} from ${it.name}`
-            : `No null rows found in ${it.name}`,
-        );
-        return { ...it, rows: cleaned };
-      }),
-    );
+    setImportedCsvFiles((prev) => prev.map((it) => {
+      if (it.id !== id) return it;
+      const clean = stripNullRows(it.rows);
+      const removed = it.rows.length - clean.length;
+      toast.success(removed > 0 ? `Stripped ${removed} null row${removed !== 1 ? "s" : ""} from ${it.name}` : `No null rows in ${it.name}`);
+      return { ...it, rows: clean };
+    }));
   };
 
   const stripAllNullRows = () => {
-    let totalRemoved = 0;
-    setImportedCsvFiles((prev) =>
-      prev.map((it) => {
-        const cleaned = stripNullRows(it.rows);
-        totalRemoved += it.rows.length - cleaned.length;
-        return { ...it, rows: cleaned };
-      }),
-    );
-    setTimeout(() => {
-      toast.success(
-        totalRemoved > 0
-          ? `Stripped ${totalRemoved} null row${totalRemoved !== 1 ? "s" : ""} across all files`
-          : "No null rows found in any file",
-      );
-    }, 0);
+    let total = 0;
+    setImportedCsvFiles((prev) => prev.map((it) => {
+      const clean = stripNullRows(it.rows);
+      total += it.rows.length - clean.length;
+      return { ...it, rows: clean };
+    }));
+    setTimeout(() => toast.success(total > 0 ? `Stripped ${total} null row${total !== 1 ? "s" : ""} across all files` : "No null rows found"), 0);
   };
 
   // ── remove item ───────────────────────────────────────────────────────────
@@ -497,77 +417,49 @@ export function CsvImportFlow() {
     clearItemExposeOverride(id);
   };
 
-  // ── generate report ───────────────────────────────────────────────────────
+  // ── generate report → /new/report ─────────────────────────────────────────
 
   const generateReport = useCallback(() => {
-    // Determine report columns: use the reference file's columns (first loaded).
-    // If schemas differ, use the union so nothing is lost.
-    const allCols = importedCsvFiles.flatMap((f) => f.columns);
-    const uniqueCols = [...new Set(allCols)];
-    // Prefer the order of the first file.
+    // Build column list: reference file order + any extras
     const refCols = importedCsvFiles[0]?.columns ?? [];
-    const extraCols = uniqueCols.filter((c) => !refCols.includes(c));
-    const dataCols = [...refCols, ...extraCols];
+    const extra = [...new Set(importedCsvFiles.flatMap((f) => f.columns))].filter((c) => !refCols.includes(c));
+    const dataCols = [...refCols, ...extra];
 
-    const rows: ReportRow[] = [];
-
+    const rows: StoreReportRow[] = [];
     for (const item of sorted) {
       const { before, after } = getItemExpose(item.id);
-      const displayed = getDisplayRows(item, filterColumn, filterKeyword, before, after, isFilterActive);
-
+      const displayed = getDisplayRows(item, filterColumn, filterKeywords, before, after, isFilterActive);
       for (const { row, isMatch } of displayed) {
-        // Map row cells to dataCols order
         const cells = dataCols.map((col) => {
           const ci = item.columns.indexOf(col);
           return ci >= 0 ? (row[ci] ?? "") : "";
         });
-        rows.push({
-          id: uid(),
-          filename: item.name,
-          cells,
-          isContext: !isMatch,
-          notes: "",
-        });
+        rows.push({ id: uid(), filename: item.name, cells, isContext: !isMatch, notes: "" });
       }
     }
 
     setReportColumns(dataCols);
     setReportRows(rows);
-    setShowReport(true);
 
     const matchCount = rows.filter((r) => !r.isContext).length;
-    const contextCount = rows.filter((r) => r.isContext).length;
+    const ctxCount   = rows.filter((r) => r.isContext).length;
     toast.success(
-      `Report generated: ${matchCount} match${matchCount !== 1 ? "es" : ""}` +
-      (contextCount > 0 ? ` + ${contextCount} context row${contextCount !== 1 ? "s" : ""}` : "") +
+      `Report: ${matchCount} match${matchCount !== 1 ? "es" : ""}` +
+      (ctxCount > 0 ? ` + ${ctxCount} context` : "") +
       ` from ${importedCsvFiles.length} file${importedCsvFiles.length !== 1 ? "s" : ""}`,
     );
-  }, [sorted, filterColumn, filterKeyword, isFilterActive, importedCsvFiles, exposeOverrides, globalBefore, globalAfter]);
-
-  const updateReportNote = (id: string, notes: string) =>
-    setReportRows((prev) => prev.map((r) => r.id === id ? { ...r, notes } : r));
-
-  const downloadReport = useCallback(() => {
-    if (!reportRows.length) return;
-    const columns = ["filename", ...reportColumns, "notes"];
-    const rows = reportRows.map((r) => [r.filename, ...r.cells, r.notes]);
-    const csv = toCsv(columns, rows);
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    a.download = `report.${timestamp()}.csv`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 15_000);
-  }, [reportRows, reportColumns]);
+    navigate({ to: "/new/report" });
+  }, [sorted, filterColumn, filterKeywords, isFilterActive, importedCsvFiles,
+      exposeOverrides, globalBefore, globalAfter, setReportColumns, setReportRows, navigate]);
 
   // ── render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="space-y-4 p-4">
 
-      {/* ── Drop zone ── */}
+      {/* Drop zone */}
       <div
-        onDrop={onDrop}
-        onDragOver={(e) => e.preventDefault()}
+        onDrop={onDrop} onDragOver={(e) => e.preventDefault()}
         onClick={() => inputRef.current?.click()}
         className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-8 text-sm text-muted-foreground transition hover:border-primary hover:text-primary"
       >
@@ -576,22 +468,17 @@ export function CsvImportFlow() {
           <FileArchive className="h-6 w-6" />
         </div>
         <p className="text-center text-xs">
-          Drop <strong>.csv</strong> files or <strong>.zip</strong> archives of CSVs — or click to browse
+          Drop <strong>.csv</strong> files or <strong>.zip</strong> archives — or click to browse
         </p>
         {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
+        <input ref={inputRef} type="file" multiple className="hidden"
           accept=".csv,.zip,application/zip,application/x-zip-compressed"
-          className="hidden"
-          onChange={(e) => addFiles(Array.from(e.target.files ?? []))}
-        />
+          onChange={(e) => addFiles(Array.from(e.target.files ?? []))} />
       </div>
 
       {importedCsvFiles.length > 0 && (
         <>
-          {/* ── Schema mismatch warning ── */}
+          {/* Schema mismatch warning */}
           {schemaMismatches.length > 0 && (
             <div className="rounded-lg border border-yellow-400/60 bg-yellow-50/60 px-3 py-2.5 dark:border-yellow-600/40 dark:bg-yellow-900/20">
               <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-yellow-800 dark:text-yellow-300">
@@ -601,8 +488,7 @@ export function CsvImportFlow() {
               <ul className="space-y-0.5 pl-5">
                 {schemaMismatches.map((m) => (
                   <li key={m.name} className="text-xs text-yellow-700 dark:text-yellow-400">
-                    <span className="font-medium">{m.name}</span>
-                    {" — "}
+                    <span className="font-medium">{m.name}</span>{" — "}
                     <span className="font-mono">[{m.columns.join(", ")}]</span>
                   </li>
                 ))}
@@ -613,161 +499,126 @@ export function CsvImportFlow() {
             </div>
           )}
 
-          {/* ── Toolbar ── */}
+          {/* Toolbar */}
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm text-muted-foreground">
               {importedCsvFiles.length} file{importedCsvFiles.length !== 1 ? "s" : ""}
             </span>
-
-            <Button
-              size="sm" variant="outline" className="h-7 gap-1 text-xs"
-              onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
-            >
+            <Button size="sm" variant="outline" className="h-7 gap-1 text-xs"
+              onClick={() => setSortDir((d) => d === "asc" ? "desc" : "asc")}>
               {sortDir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />}
               {sortDir === "asc" ? "Oldest first" : "Newest first"}
             </Button>
-
-            <Button
-              size="sm" variant="outline" className="h-7 text-xs"
-              onClick={stripAllNullRows}
-            >
-              <Eraser className="mr-1 h-3.5 w-3.5" />
-              Strip null rows
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={stripAllNullRows}>
+              <Eraser className="mr-1 h-3.5 w-3.5" />Strip null rows
             </Button>
-
-            <Button
-              size="sm" variant="outline" className="h-7 text-xs"
-              onClick={exportAllZip} disabled={zipExporting}
-            >
-              {zipExporting
-                ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                : <Download className="mr-1 h-3.5 w-3.5" />}
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={exportAllZip} disabled={zipExporting}>
+              {zipExporting ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Download className="mr-1 h-3.5 w-3.5" />}
               Export all ZIP
             </Button>
-
-            {/* ── Global expose control ── */}
             <div className="ml-auto flex items-center">
-              <ExposeControl
-                before={globalBefore} after={globalAfter}
-                onBefore={setGlobalBefore} onAfter={setGlobalAfter}
-              />
+              <ExposeControl before={globalBefore} after={globalAfter} onBefore={setGlobalBefore} onAfter={setGlobalAfter} />
             </div>
-
-            <Button
-              size="sm" variant="ghost" className="h-7 text-xs text-destructive"
-              onClick={() => { setImportedCsvFiles([]); setOpenItems([]); clearFilter(); setReportRows([]); setShowReport(false); }}
-            >
+            <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive"
+              onClick={() => { setImportedCsvFiles([]); setOpenItems([]); clearFilter(); }}>
               <Trash2 className="mr-1 h-3.5 w-3.5" />Clear all
             </Button>
           </div>
 
-          {/* ── Filter bar ── */}
-          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2">
-            <Filter className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
+          {/* Filter bar */}
+          <div className="rounded-lg border border-border bg-muted/20 px-3 py-2 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Filter className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
 
-            <input
-              placeholder="Column name"
-              value={filterColumn}
-              onChange={(e) => onFilterColumnChange(e.target.value)}
-              className="h-7 w-36 rounded border border-input bg-background px-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-            />
+              {/* Column input */}
+              <input
+                placeholder="Column name"
+                value={filterColumn}
+                onChange={(e) => onFilterColumnChange(e.target.value)}
+                className="h-7 w-36 rounded border border-input bg-background px-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+              />
 
-            <input
-              placeholder="Keyword"
-              value={filterKeyword}
-              onChange={(e) => onFilterKeywordChange(e.target.value)}
-              className="h-7 min-w-32 flex-1 rounded border border-input bg-background px-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-            />
+              {/* Keyword chips + input */}
+              <div className="flex flex-1 flex-wrap items-center gap-1 rounded border border-input bg-background px-2 py-0.5 min-w-48">
+                {filterKeywords.map((kw, i) => {
+                  const c = kwColor(i);
+                  return (
+                    <span key={kw} className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium ${c.bg} ${c.text}`}>
+                      {kw}
+                      <button onClick={() => removeKeyword(kw)} className="opacity-60 hover:opacity-100">
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </span>
+                  );
+                })}
+                <input
+                  placeholder={filterKeywords.length ? "Add keyword…" : "Keyword (Enter to add)"}
+                  value={keywordInput}
+                  onChange={(e) => setKeywordInput(e.target.value)}
+                  onKeyDown={onKeywordKeyDown}
+                  onBlur={() => { if (keywordInput.trim()) commitKeyword(keywordInput); }}
+                  className="h-6 flex-1 min-w-24 bg-transparent text-xs focus:outline-none"
+                />
+                {keywordInput.trim() && (
+                  <button onClick={() => commitKeyword(keywordInput)}
+                    className="flex h-5 w-5 items-center justify-center rounded bg-primary/10 text-primary hover:bg-primary/20">
+                    <Plus className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
 
-            {isFilterActive && (
-              <>
-                <span className="text-xs text-muted-foreground">
-                  {filterStats!.total} match{filterStats!.total !== 1 ? "es" : ""}
-                  {filterStats!.exposed > 0 && ` + ${filterStats!.exposed} context`}
-                  {" across "}
-                  {filterStats!.files} file{filterStats!.files !== 1 ? "s" : ""}
-                </span>
+              {isFilterActive && (
+                <>
+                  <span className="text-xs text-muted-foreground">
+                    {filterStats!.total} match{filterStats!.total !== 1 ? "es" : ""}
+                    {filterStats!.exposed > 0 && ` + ${filterStats!.exposed} ctx`}
+                    {" · "}{filterStats!.files} file{filterStats!.files !== 1 ? "s" : ""}
+                  </span>
+                  <button onClick={clearFilter}
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground">
+                    <X className="h-3 w-3" />Clear
+                  </button>
+                </>
+              )}
 
-                {/* Generate report */}
-                <Button
-                  size="sm" variant="secondary" className="h-7 gap-1 text-xs"
-                  onClick={generateReport}
-                >
-                  <TableProperties className="h-3.5 w-3.5" />
-                  Generate report
-                </Button>
-
-                <button
-                  onClick={clearFilter}
-                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground"
-                  title="Clear filter"
-                >
-                  <X className="h-3 w-3" />Clear
-                </button>
-              </>
-            )}
-
-            {/* Generate report even without filter */}
-            {!isFilterActive && importedCsvFiles.length > 0 && (
-              <Button
-                size="sm" variant="outline" className="ml-auto h-7 gap-1 text-xs"
-                onClick={generateReport}
-              >
-                <TableProperties className="h-3.5 w-3.5" />
-                Generate report
+              {/* Generate report — always visible when files are loaded */}
+              <Button size="sm" variant={isFilterActive ? "secondary" : "outline"} className="h-7 gap-1 text-xs"
+                onClick={generateReport}>
+                <TableProperties className="h-3.5 w-3.5" />Generate report
               </Button>
-            )}
+            </div>
           </div>
 
-          {/* ── Accordion list ── */}
-          <Accordion
-            type="multiple"
-            value={openItems}
-            onValueChange={setOpenItems}
-            className="space-y-2"
-          >
+          {/* Accordion list */}
+          <Accordion type="multiple" value={openItems} onValueChange={setOpenItems} className="space-y-2">
             {sorted.map((item) => {
               const { before, after } = getItemExpose(item.id);
               const hasOverride = !!exposeOverrides[item.id];
-              const displayed  = getDisplayRows(item, filterColumn, filterKeyword, before, after, isFilterActive);
-              const matchCount = displayed.filter((r) => r.isMatch).length;
-              const hasMatches = !isFilterActive || matchCount > 0;
+              const displayed   = getDisplayRows(item, filterColumn, filterKeywords, before, after, isFilterActive);
+              const matchCount  = displayed.filter((r) => r.isMatch).length;
+              const hasMatches  = !isFilterActive || matchCount > 0;
+              const colIdx      = item.columns.findIndex((c) => c.toLowerCase() === filterColumn.trim().toLowerCase());
 
               return (
-                <AccordionItem
-                  key={item.id}
-                  value={item.id}
-                  className={`overflow-hidden rounded-lg border px-3 transition-opacity ${
-                    isFilterActive && !hasMatches ? "border-border opacity-40" : "border-border"
-                  }`}
-                >
+                <AccordionItem key={item.id} value={item.id}
+                  className={`overflow-hidden rounded-lg border px-3 transition-opacity ${isFilterActive && !hasMatches ? "border-border opacity-40" : "border-border"}`}>
                   <AccordionTrigger className="py-2.5 hover:no-underline [&>svg]:flex-shrink-0">
                     <div className="flex min-w-0 flex-1 items-center gap-2 pr-2">
                       <FileSpreadsheet className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
-
-                      <span className="min-w-0 flex-1 truncate text-left text-sm font-medium" title={item.name}>
-                        {item.name}
-                      </span>
-
+                      <span className="min-w-0 flex-1 truncate text-left text-sm font-medium" title={item.name}>{item.name}</span>
                       <Badge variant="secondary" className="flex-shrink-0 font-mono text-[11px] tracking-tight">
                         {item.tag.year}:{item.tag.month}:p{item.tag.part}
                       </Badge>
-
-                      <span className={`flex-shrink-0 text-xs ${
-                        isFilterActive
-                          ? hasMatches ? "font-semibold text-primary" : "text-muted-foreground"
-                          : "text-muted-foreground"
-                      }`}>
+                      <span className={`flex-shrink-0 text-xs ${isFilterActive ? (hasMatches ? "font-semibold text-primary" : "text-muted-foreground") : "text-muted-foreground"}`}>
                         {isFilterActive
-                          ? `${matchCount} match${matchCount !== 1 ? "es" : ""}` +
-                            (displayed.length > matchCount ? ` + ${displayed.length - matchCount} ctx` : "")
+                          ? `${matchCount} match${matchCount !== 1 ? "es" : ""}` + (displayed.length > matchCount ? ` + ${displayed.length - matchCount} ctx` : "")
                           : `${item.rows.length} row${item.rows.length !== 1 ? "s" : ""}`}
                       </span>
                     </div>
                   </AccordionTrigger>
 
                   <AccordionContent className="pb-3">
-                    {/* Actions row */}
+                    {/* Per-item actions */}
                     <div className="mb-2 flex flex-wrap items-center gap-2">
                       <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => downloadItem(item)}>
                         <Download className="mr-1 h-3 w-3" />Download
@@ -775,31 +626,19 @@ export function CsvImportFlow() {
                       <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => stripNullRowsForItem(item.id)}>
                         <Eraser className="mr-1 h-3 w-3" />Strip null rows
                       </Button>
-
-                      {/* Per-item expose override */}
                       <div className="flex items-center gap-1">
-                        <ExposeControl
-                          before={before} after={after} compact
+                        <ExposeControl before={before} after={after} compact
                           onBefore={(v) => setItemExpose(item.id, { before: v })}
-                          onAfter={(v) => setItemExpose(item.id, { after: v })}
-                        />
+                          onAfter={(v) => setItemExpose(item.id, { after: v })} />
                         {hasOverride && (
-                          <button
-                            onClick={() => clearItemExposeOverride(item.id)}
-                            className="ml-1 rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
-                            title="Reset to global"
-                          >
+                          <button onClick={() => clearItemExposeOverride(item.id)}
+                            className="ml-1 rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:text-foreground">
                             reset
                           </button>
                         )}
                       </div>
-
-                      <Button
-                        size="icon" variant="ghost"
-                        className="ml-auto h-7 w-7 text-muted-foreground"
-                        title="Remove"
-                        onClick={() => removeItem(item.id)}
-                      >
+                      <Button size="icon" variant="ghost" className="ml-auto h-7 w-7 text-muted-foreground"
+                        title="Remove" onClick={() => removeItem(item.id)}>
                         <X className="h-3.5 w-3.5" />
                       </Button>
                     </div>
@@ -812,13 +651,8 @@ export function CsvImportFlow() {
                             <thead className="bg-muted">
                               <tr>
                                 {item.columns.map((col, ci) => (
-                                  <th
-                                    key={ci}
-                                    className={`whitespace-nowrap px-2 py-1.5 text-left font-semibold ${
-                                      isFilterActive && col.toLowerCase() === filterColumn.trim().toLowerCase()
-                                        ? "bg-primary/10 text-primary" : ""
-                                    }`}
-                                  >
+                                  <th key={ci}
+                                    className={`whitespace-nowrap px-2 py-1.5 text-left font-semibold ${isFilterActive && ci === colIdx ? "bg-primary/10 text-primary" : ""}`}>
                                     {col}
                                   </th>
                                 ))}
@@ -826,32 +660,15 @@ export function CsvImportFlow() {
                             </thead>
                             <tbody>
                               {displayed.map(({ row, isMatch }, ri) => (
-                                <tr
-                                  key={ri}
-                                  className={`border-t border-border ${
-                                    isFilterActive && !isMatch
-                                      ? "opacity-50"
-                                      : ri % 2 === 1 ? "bg-muted/30" : ""
-                                  }`}
-                                >
+                                <tr key={ri}
+                                  className={`border-t border-border ${isFilterActive && !isMatch ? "opacity-50" : ri % 2 === 1 ? "bg-muted/30" : ""}`}>
                                   {item.columns.map((col, ci) => {
                                     const val = row[ci] ?? "";
-                                    const isMatchCell =
-                                      isMatch &&
-                                      isFilterActive &&
-                                      col.toLowerCase() === filterColumn.trim().toLowerCase() &&
-                                      filterKeyword.trim() !== "" &&
-                                      val.toLowerCase().includes(filterKeyword.trim().toLowerCase());
+                                    const kwIdx = isMatch && isFilterActive && ci === colIdx
+                                      ? matchingKeywordIndex(val, filterKeywords) : -1;
                                     return (
-                                      <td
-                                        key={ci}
-                                        className={`whitespace-nowrap px-2 py-1 ${
-                                          isMatchCell ? "font-medium text-foreground" : "text-muted-foreground"
-                                        }`}
-                                      >
-                                        {isMatchCell ? (
-                                          <Highlight text={val} keyword={filterKeyword.trim()} />
-                                        ) : val}
+                                      <td key={ci} className={`whitespace-nowrap px-2 py-1 ${kwIdx >= 0 ? "font-medium text-foreground" : "text-muted-foreground"}`}>
+                                        {kwIdx >= 0 ? <MultiHighlight text={val} keywords={filterKeywords} /> : val}
                                       </td>
                                     );
                                   })}
@@ -871,103 +688,55 @@ export function CsvImportFlow() {
               );
             })}
           </Accordion>
-
-          {/* ── Report panel ── */}
-          {showReport && reportRows.length > 0 && (
-            <div className="rounded-lg border border-border">
-              {/* Report header */}
-              <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-                <TableProperties className="h-4 w-4 text-muted-foreground" />
-                <span className="flex-1 text-sm font-semibold">
-                  Report
-                  <span className="ml-2 text-xs font-normal text-muted-foreground">
-                    {reportRows.filter((r) => !r.isContext).length} match{reportRows.filter((r) => !r.isContext).length !== 1 ? "es" : ""}
-                    {reportRows.some((r) => r.isContext) && ` + ${reportRows.filter((r) => r.isContext).length} context`}
-                    {" · "}{[...new Set(reportRows.map((r) => r.filename))].length} file{[...new Set(reportRows.map((r) => r.filename))].length !== 1 ? "s" : ""}
-                  </span>
-                </span>
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={downloadReport}>
-                  <Download className="mr-1 h-3.5 w-3.5" />Export CSV
-                </Button>
-                <button
-                  onClick={() => setShowReport(false)}
-                  className="rounded p-1 text-muted-foreground hover:text-foreground"
-                  title="Close report"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-
-              {/* Report table */}
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-xs">
-                  <thead className="bg-muted">
-                    <tr>
-                      <th className="whitespace-nowrap px-2 py-1.5 text-left font-semibold text-muted-foreground">
-                        filename
-                      </th>
-                      {reportColumns.map((col, ci) => (
-                        <th key={ci} className="whitespace-nowrap px-2 py-1.5 text-left font-semibold">
-                          {col}
-                        </th>
-                      ))}
-                      <th className="whitespace-nowrap px-2 py-1.5 text-left font-semibold text-primary">
-                        notes
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {reportRows.map((rr, ri) => (
-                      <tr
-                        key={rr.id}
-                        className={`border-t border-border ${
-                          rr.isContext
-                            ? "opacity-50"
-                            : ri % 2 === 1 ? "bg-muted/30" : ""
-                        }`}
-                      >
-                        <td className="whitespace-nowrap px-2 py-1 font-mono text-muted-foreground">
-                          {rr.filename}
-                        </td>
-                        {rr.cells.map((cell, ci) => (
-                          <td key={ci} className="whitespace-nowrap px-2 py-1 text-muted-foreground">
-                            {cell}
-                          </td>
-                        ))}
-                        <td className="px-1 py-0.5">
-                          <input
-                            className="w-full min-w-24 rounded bg-transparent px-1.5 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary"
-                            value={rr.notes}
-                            placeholder="Add note…"
-                            onChange={(e) => updateReportNote(rr.id, e.target.value)}
-                          />
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
         </>
       )}
     </div>
   );
 }
 
-// ── Highlight matched substring ───────────────────────────────────────────────
+// ── Multi-keyword highlight ───────────────────────────────────────────────────
 
-function Highlight({ text, keyword }: { text: string; keyword: string }) {
-  if (!keyword) return <>{text}</>;
-  const idx = text.toLowerCase().indexOf(keyword.toLowerCase());
-  if (idx === -1) return <>{text}</>;
-  return (
-    <>
-      {text.slice(0, idx)}
-      <mark className="rounded bg-yellow-200 px-0.5 text-yellow-900 dark:bg-yellow-700 dark:text-yellow-100">
-        {text.slice(idx, idx + keyword.length)}
-      </mark>
-      {text.slice(idx + keyword.length)}
-    </>
-  );
+function MultiHighlight({ text, keywords }: { text: string; keywords: string[] }) {
+  if (!keywords.length) return <>{text}</>;
+
+  // Build a list of [start, end, kwIndex] spans
+  const spans: { start: number; end: number; kwIdx: number }[] = [];
+  keywords.forEach((kw, kwIdx) => {
+    if (!kw.trim()) return;
+    const lower = text.toLowerCase();
+    const needle = kw.trim().toLowerCase();
+    let pos = 0;
+    while (pos < text.length) {
+      const idx = lower.indexOf(needle, pos);
+      if (idx === -1) break;
+      spans.push({ start: idx, end: idx + needle.length, kwIdx });
+      pos = idx + needle.length;
+    }
+  });
+
+  if (!spans.length) return <>{text}</>;
+
+  // Sort and merge overlapping spans (first keyword wins)
+  spans.sort((a, b) => a.start - b.start || a.kwIdx - b.kwIdx);
+  const merged: { start: number; end: number; kwIdx: number }[] = [];
+  for (const s of spans) {
+    const last = merged[merged.length - 1];
+    if (last && s.start < last.end) { if (s.end > last.end) last.end = s.end; }
+    else merged.push({ ...s });
+  }
+
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  for (const { start, end, kwIdx } of merged) {
+    if (cursor < start) parts.push(text.slice(cursor, start));
+    const c = kwColor(kwIdx);
+    parts.push(
+      <mark key={start} className={`rounded px-0.5 ${c.mark}`}>
+        {text.slice(start, end)}
+      </mark>,
+    );
+    cursor = end;
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return <>{parts}</>;
 }
