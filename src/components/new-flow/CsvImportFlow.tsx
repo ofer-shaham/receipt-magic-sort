@@ -13,7 +13,7 @@ import { toast } from "sonner";
 import {
   FileSpreadsheet, FileArchive,
   ArrowUp, ArrowDown,
-  Download, Trash2, X, Loader2, Filter,
+  Download, Trash2, X, Loader2, Filter, Eraser,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -320,6 +320,46 @@ export function CsvImportFlow() {
     setZipExporting(false);
   }, [importedCsvFiles]);
 
+  // ── strip null rows (per-item) ────────────────────────────────────────────────
+
+  const stripNullRowsForItem = (id: string) => {
+    setImportedCsvFiles((prev) =>
+      prev.map((it) => {
+        if (it.id !== id) return it;
+        const before = it.rows.length;
+        const cleaned = stripNullRows(it.rows);
+        const removed = before - cleaned.length;
+        toast.success(
+          removed > 0
+            ? `Stripped ${removed} null row${removed !== 1 ? "s" : ""} from ${it.name}`
+            : `No null rows found in ${it.name}`,
+        );
+        return { ...it, rows: cleaned };
+      }),
+    );
+  };
+
+  // ── strip null rows (all files) ───────────────────────────────────────────────
+
+  const stripAllNullRows = () => {
+    let totalRemoved = 0;
+    setImportedCsvFiles((prev) =>
+      prev.map((it) => {
+        const cleaned = stripNullRows(it.rows);
+        totalRemoved += it.rows.length - cleaned.length;
+        return { ...it, rows: cleaned };
+      }),
+    );
+    // Use setTimeout so the state update completes before reading totalRemoved
+    setTimeout(() => {
+      toast.success(
+        totalRemoved > 0
+          ? `Stripped ${totalRemoved} null row${totalRemoved !== 1 ? "s" : ""} across all files`
+          : "No null rows found in any file",
+      );
+    }, 0);
+  };
+
   // ── remove item ───────────────────────────────────────────────────────────────
 
   const removeItem = (id: string) => {
@@ -371,6 +411,14 @@ export function CsvImportFlow() {
             >
               {sortDir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />}
               {sortDir === "asc" ? "Oldest first" : "Newest first"}
+            </Button>
+
+            <Button
+              size="sm" variant="outline" className="h-7 text-xs"
+              onClick={stripAllNullRows}
+            >
+              <Eraser className="mr-1 h-3.5 w-3.5" />
+              Strip null rows
             </Button>
 
             <Button
@@ -492,6 +540,12 @@ export function CsvImportFlow() {
                         onClick={() => downloadItem(item)}
                       >
                         <Download className="mr-1 h-3 w-3" />Download
+                      </Button>
+                      <Button
+                        size="sm" variant="outline" className="h-7 text-xs"
+                        onClick={() => stripNullRowsForItem(item.id)}
+                      >
+                        <Eraser className="mr-1 h-3 w-3" />Strip null rows
                       </Button>
                       <Button
                         size="icon" variant="ghost"
