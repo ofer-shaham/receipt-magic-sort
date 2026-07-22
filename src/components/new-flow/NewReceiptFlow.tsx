@@ -15,6 +15,7 @@ import {
   type StoreCsvItem,
   DEFAULT_COLUMNS_HINT,
 } from "@/contexts/AppStore";
+import { CsvImportFlow } from "@/components/new-flow/CsvImportFlow";
 import { CropModal } from "@/components/CropModal";
 import { CsvTable } from "@/components/new-flow/CsvTable";
 import { Button } from "@/components/ui/button";
@@ -498,6 +499,9 @@ export function NewReceiptFlow() {
         </InlineTab>
         <InlineTab active={newTab === "csv"}  onClick={() => setNewTab("csv")}>
           Image → CSV
+        </InlineTab>
+        <InlineTab active={newTab === "csv-import"} onClick={() => setNewTab("csv-import")}>
+          CSV Import
         </InlineTab>
       </div>
 
@@ -1022,6 +1026,15 @@ export function NewReceiptFlow() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          TAB 3: CSV Import
+         ══════════════════════════════════════════════════════════════════════ */}
+      {newTab === "csv-import" && (
+        <div className="flex flex-1 flex-col">
+          <CsvImportFlow />
         </div>
       )}
 
